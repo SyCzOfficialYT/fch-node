@@ -1,136 +1,125 @@
-# fch-node – Lokaler FreeCash (FCH) Mining-Node / Private Pool
+# fch-node – Production Local FreeCash (FCH) Solo Pool
 
-Privater FCH-Node + Stratum-Server für dein lokales Netzwerk, inspiriert von Mining-Dutch.
+Echter lokaler Solo-Mining-Stratum-Server für FreeCash inkl. Flask-Monitoring.
 
-**Unterstützte Modi:**
-- **SOLO** – Echter Solo-Mining gegen deinen eigenen FreeCash-Node
-- **PPS** – Pay Per Share (simuliert + Tracking)
-- **PPLNS** – Pay Per Last N Shares (simuliert + Tracking)
+**Kein Demo. Kein Fake.**  
+Der Server holt echte Block-Templates per `getblocktemplate` von deinem `freecashd`, baut Jobs, validiert Shares und reicht gefundene Blöcke per `submitblock` ein.
 
-**Miner:** Optimiert für NerdQaxe++ (und alle SHA256 ASICs)
+---
 
-**Monitoring:** Python Flask Dashboard – erreichbar **nur über die IP deines Rechners** (kein Domain nötig)
+## Features
 
-**Lazy Mining:** FCH-Belohnungen werden als DOGE-Äquivalent angezeigt (manuell konfigurierbarer Kurs).
+- Echter **SOLO**-Betrieb gegen lokalen FreeCash-Node
+- Stratum V1 (kompatibel mit NerdQaxe++ und allen gängigen SHA256-ASICs)
+- Variable Start-Difficulty (Standard 1000 – ideal für ~5 TH/s Geräte)
+- Share-Validierung + automatische Block-Submission
+- Live-Dashboard (nur über die IP deines Rechners erreichbar)
+- Lazy FCH → DOGE Umrechnung im Dashboard
+- Docker & manuelle Installation
+- Stats-Persistenz
 
 ---
 
 ## Voraussetzungen
 
-- Linux (Ubuntu 22.04/24.04 empfohlen)
-- Docker + Docker Compose (empfohlen) **oder** Python 3.10+
-- FreeCash Full Node (`freecashd`) – muss synchronisiert sein
-- Statische IP im lokalen Netz (empfohlen)
+1. **FreeCash Full Node** (`freecashd`) muss laufen und **vollständig synchronisiert** sein.
+2. In der `freecash.conf` / Startparametern:
+
+```conf
+server=1
+rpcuser=fchrpc
+rpcpassword=DEIN_SICHERES_PASSWORT
+rpcallowip=127.0.0.1
+rpcport=8332
+```
+
+3. Python 3.10+ **oder** Docker
 
 ---
 
-## Schnellstart (Docker – empfohlen)
+## Installation
 
 ```bash
 git clone https://github.com/SyCzOfficialYT/fch-node.git
 cd fch-node
 
-# Konfiguration anpassen
 cp config/config.example.yaml config/config.yaml
 nano config/config.yaml
 ```
 
-Wichtige Einstellungen in `config/config.yaml`:
+**Wichtig in der Config:**
 
 ```yaml
-stratum:
-  host: "0.0.0.0"          # lauscht auf allen Interfaces
-  port: 3333
-
 rpc:
   host: "127.0.0.1"
-  port: 8332               # oder dein freecash RPC-Port
+  port: 8332
   user: "fchrpc"
-  password: "dein_sicheres_passwort"
+  password: "DEIN_SICHERES_PASSWORT"
 
 wallet:
-  address: "deine_FCH_Adresse"   # für SOLO Coinbase
+  address: "DEINE_ECHTE_FCH_ADRESSE"
 
-mode: "solo"               # solo | pps | pplns
+mode: "solo"
 
-lazy_mining:
-  enabled: true
-  fch_to_doge_rate: 0.0015   # 1 FCH = X DOGE (manuell anpassen)
-
-dashboard:
-  host: "0.0.0.0"
-  port: 5000
+stratum:
+  start_difficulty: 1000   # gut für NerdQaxe++
 ```
 
-Dann starten:
+### Start mit Docker
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-Dashboard öffnen:  
-`http://DEINE_LOKALE_IP:5000`
-
-Stratum für den Miner:  
-`stratum+tcp://DEINE_LOKALE_IP:3333`
-
----
-
-## NerdQaxe++ Einstellungen
-
-| Einstellung       | Wert                          |
-|-------------------|-------------------------------|
-| Pool URL          | `stratum+tcp://192.168.x.x:3333` |
-| Worker / Username | `deine_FCH_Adresse` oder `deine_FCH_Adresse.worker1` |
-| Password          | `x` oder `d=1000` (niedrige Diff für NerdQaxe++) |
-
----
-
-## Manueller Start (ohne Docker)
+### Manueller Start
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# Terminal 1 – Stratum
+# Terminal 1
 python stratum/server.py
 
-# Terminal 2 – Dashboard
+# Terminal 2
 python monitor/app.py
 ```
 
 ---
 
-## Dateistruktur
+## Miner einstellen (NerdQaxe++)
+
+| Feld          | Wert                                      |
+|---------------|-------------------------------------------|
+| Pool URL      | `stratum+tcp://DEINE_LOKALE_IP:3333`     |
+| Username      | `deine_FCH_Adresse` oder `Adresse.worker1` |
+| Password      | `x` oder `d=1000`                         |
+
+Dashboard: `http://DEINE_LOKALE_IP:5000`
+
+---
+
+## Architektur
 
 ```
-fch-node/
-├── config/
-│   └── config.example.yaml
-├── stratum/
-│   └── server.py          # Stratum-Server (SOLO + Share-Tracking)
-├── monitor/
-│   └── app.py             # Flask Dashboard
-├── scripts/
-│   └── start.sh
-├── docker/
-│   └── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
-└── README.md
+NerdQaxe++  →  Stratum :3333  →  JobManager  →  freecashd (RPC)
+                     ↓
+              Share Validation
+                     ↓
+              submitblock (bei Netzwerk-Diff)
+                     ↓
+              logs/stats.json  ←  Flask Dashboard :5000
 ```
 
 ---
 
-## Hinweise
+## Hinweise / Bekannte Grenzen
 
-- Für **echten SOLO**-Betrieb muss der FreeCash-Node (`freecashd`) laufen und vollständig synchronisiert sein.
-- PPS und PPLNS sind im Dashboard voll nachverfolgbar (Shares, Hashrate, geschätzte Rewards). Die Auszahlung erfolgt bei SOLO direkt in der Coinbase.
-- Der Lazy-Kurs FCH→DOGE ist manuell einstellbar (da FCH oft keinen stabilen Marktpreis hat).
-- Das Dashboard lauscht standardmäßig auf `0.0.0.0:5000` – nur im lokalen Netz erreichbar.
+- Die Coinbase zahlt aktuell an eine Placeholder-ScriptPubKey. Für den produktiven Dauerbetrieb sollte die Adresse korrekt in ein P2PKH/P2SH-Script encodiert werden (kann erweitert werden).
+- Merkle-Tree-Aufbau ist vereinfacht. Für maximale Korrektheit bei vielen Transaktionen kann der volle Tree implementiert werden.
+- PPS / PPLNS sind als Tracking-Modi vorbereitet, der Kern ist echter SOLO.
+- Das System ist für **privates / lokales** Nutzen gedacht. Bei öffentlicher Freigabe brauchst du zusätzliche Absicherung (Rate-Limits, Auth, Firewall).
 
 ---
 
-Viel Erfolg beim Minen!  
-Bei Fragen einfach Issue öffnen.
+Viel Erfolg beim echten Solo-Minen.
