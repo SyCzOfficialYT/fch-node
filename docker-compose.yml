@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  stratum:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: fch-stratum
+    restart: unless-stopped
+    ports:
+      - "3333:3333"
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+    command: python stratum/server.py
+    networks:
+      - fch-net
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: fch-dashboard
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+    command: python monitor/app.py
+    depends_on:
+      - stratum
+    networks:
+      - fch-net
+
+networks:
+  fch-net:
+    driver: bridge

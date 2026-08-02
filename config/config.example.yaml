@@ -1,0 +1,45 @@
+# fch-node Konfiguration
+# Kopiere diese Datei nach config.yaml und passe sie an
+
+stratum:
+  host: "0.0.0.0"
+  port: 3333
+  # Start-Difficulty für kleine Miner (NerdQaxe++ ~4.8 TH/s)
+  start_difficulty: 1000
+  # VarDiff Ziel (Shares pro Minute)
+  vardiff_target: 15
+
+rpc:
+  # FreeCash Node RPC
+  host: "127.0.0.1"
+  port: 8332          # Standard freecashd RPC Port (anpassen falls nötig)
+  user: "fchrpc"
+  password: "CHANGE_ME_SECURE_PASSWORD"
+  # Timeout in Sekunden
+  timeout: 30
+
+wallet:
+  # Adresse, die bei SOLO in die Coinbase geschrieben wird
+  address: "DEINE_FCH_WALLET_ADRESSE_HIER"
+
+# Aktiver Modus: solo | pps | pplns
+mode: "solo"
+
+# Lazy Mining – FCH Amount → DOGE Äquivalent
+lazy_mining:
+  enabled: true
+  # 1 FCH = X DOGE (manuell pflegen, da FCH oft keinen stabilen Preis hat)
+  fch_to_doge_rate: 0.0015
+  # Optional: automatischer Kurs von einer API (falls verfügbar)
+  use_api: false
+
+dashboard:
+  host: "0.0.0.0"
+  port: 5000
+  # Geheimnis für einfache Authentifizierung (optional)
+  secret_key: "fch-local-secret-change-me"
+
+# Logging
+logging:
+  level: "INFO"
+  file: "logs/fch-node.log"
