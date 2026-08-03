@@ -102,8 +102,10 @@ install_legacy_runtime() {
         cd "$runtime_tmp/libnatpmp-${NATPMP_VERSION}"
         make -j"$(nproc)"
     )
-    local natpmp_built="$runtime_tmp/libnatpmp-${NATPMP_VERSION}/libnatpmp.so.1"
-    if [ ! -f "$natpmp_built" ]; then echo -e "${RED}✗ libnatpmp Build erzeugte libnatpmp.so.1 nicht.${NC}"; exit 1; fi
+    # libnatpmp builds libnatpmp.so with SONAME libnatpmp.so.1.
+    # Install it under the ABI name required by the BCH2 binary.
+    local natpmp_built="$runtime_tmp/libnatpmp-${NATPMP_VERSION}/libnatpmp.so"
+    if [ ! -f "$natpmp_built" ]; then echo -e "${RED}✗ libnatpmp Build erzeugte keine libnatpmp.so.${NC}"; exit 1; fi
     $SUDO install -Dm755 "$natpmp_built" "$RUNTIME_DIR/libnatpmp.so.1"
     $SUDO chmod 755 "$RUNTIME_DIR"/*.so*
     rm -rf "$runtime_tmp"; trap - EXIT
@@ -237,24 +239,36 @@ stop_stack() { echo "Stoppe Stratum + Dashboard..."; [ -f "\$STRATUM_PIDFILE" ] 
 case "\$1" in
 start) start_stack;; stop) stop_stack;; restart) stop_stack; sleep 1; start_stack;;
 status) sudo systemctl status "\$SERVICE" --no-pager -l | head -n 15; echo ""; if [ -f "\$STRATUM_PIDFILE" ] && kill -0 \$(cat "\$STRATUM_PIDFILE") 2>/dev/null; then echo "Stratum:   läuft (PID \$(cat \$STRATUM_PIDFILE))"; else echo "Stratum:   gestoppt"; fi; if [ -f "\$MONITOR_PIDFILE" ] && kill -0 \$(cat "\$MONITOR_PIDFILE") 2>/dev/null; then echo "Dashboard: läuft (PID \$(cat \$MONITOR_PIDFILE) → http://\$(hostname -I | awk '{print \$1}'):5000"; else echo "Dashboard: gestoppt"; fi; echo ""; if \$CLI -conf="\$CONF" getblockchaininfo > /dev/null 2>&1; then echo "--- Blockchain ---"; \$CLI -conf="\$CONF" getblockchaininfo | grep -E '"chain"|"blocks"|"headers"|"verificationprogress"|"initialblockdownload"|"difficulty"'; else echo "Node antwortet noch nicht auf RPC."; fi;;
-sync|info) \$CLI -conf="\$CONF" getblockchaininfo;; balance) \$CLI -conf="\$CONF" getbalance;; newaddress) \$CLI -conf="\$CONF" getnewaddress;;
-log|logs) echo "=== Node Logs (Ctrl+C zum Beenden) ==="; journalctl -u "\$SERVICE" -f --no-pager;; stratum-log) tail -f /tmp/bch2-stratum.log;; dash-log|monitor-log) tail -f /tmp/bch2-monitor.log;;
+sync|info) \$CLI -conf="\$CONF" getblockchaininfo;;
+balance) \$CLI -conf="\$CONF" getbalance;;
+newaddress) \$CLI -conf="\$CONF" getnewaddress;;
+log|logs) echo "=== Node Logs (Ctrl+C zum Beenden) ==="; journalctl -u "\$SERVICE" -f --no-pager;;
+stratum-log) tail -f /tmp/bch2-stratum.log;;
+dash-log|monitor-log) tail -f /tmp/bch2-monitor.log;;
 cli) shift; \$CLI -conf="\$CONF" "\$@";;
 *) echo "BCH2 Solo Stack Steuerung"; echo ""; echo "  bch-node start        Node + Stratum + Dashboard starten"; echo "  bch-node stop         Alles stoppen"; echo "  bch-node restart      Alles neu starten"; echo "  bch-node status       Status von allem"; echo "  bch-node sync         Blockchain-Info"; echo "  bch-node balance      Kontostand"; echo "  bch-node newaddress   Neue Adresse"; echo "  bch-node log          Node Live-Logs"; echo "  bch-node stratum-log  Stratum Logs"; echo "  bch-node dash-log     Dashboard Logs"; echo "  bch-node cli <cmd>    bitcoincashII-cli Befehl"; echo "";;
 esac
 WRAPEOF
-    $SUDO chmod +x "$CLI_WRAPPER"; echo -e "${GREEN}✓ 'bch-node' Befehl installiert${NC}"
+    $SUDO chmod +x "$CLI_WRAPPER"
+    echo -e "${GREEN}✓ 'bch-node' Befehl installiert${NC}"
 }
 
 install_python_deps() {
     echo ""; echo -e "${CYAN}→ Python-Abhängigkeiten für Stratum/Dashboard...${NC}"
-    if [ -f "$REPO_ROOT/requirements.txt" ]; then pip3 install -q -r "$REPO_ROOT/requirements.txt" --break-system-packages && echo -e "${GREEN}✓ Python-Pakete installiert${NC}" || echo -e "${YELLOW}⚠ pip install fehlgeschlagen – bitte manuell: pip3 install -r requirements.txt${NC}"; fi
+    if [ -f "$REPO_ROOT/requirements.txt" ]; then
+        pip3 install -q -r "$REPO_ROOT/requirements.txt" --break-system-packages && \
+            echo -e "${GREEN}✓ Python-Pakete installiert${NC}" || \
+            echo -e "${YELLOW}⚠ pip install fehlgeschlagen – bitte manuell: pip3 install -r requirements.txt${NC}"
+    fi
 }
 
 main() {
     need_sudo; detect_arch
-    echo ""; echo "Installiert wird:"; echo "  • bitcoincashIId + CLI"; echo "  • isolierte BCH2 Runtime (miniupnpc 2.2.2 + libnatpmp 20230423)"; echo "  • systemd Service"; echo "  • bch-node Kommando (startet auch Stratum + Dashboard)"; echo "  • RPC-Passwort → config/config.yaml"; echo ""; read -p "Fortfahren? [Y/n] " -n 1 -r; echo; [[ $REPLY =~ ^[Nn]$ ]] && { echo "Abgebrochen."; exit 0; }
+    echo ""; echo "Installiert wird:"; echo "  • bitcoincashIId + CLI"; echo "  • isolierte BCH2 Runtime (miniupnpc 2.2.2 + libnatpmp 20230423)"; echo "  • systemd Service"; echo "  • bch-node Kommando (startet auch Stratum + Dashboard)"; echo "  • RPC-Passwort → config/config.yaml"; echo ""
+    read -p "Fortfahren? [Y/n] " -n 1 -r; echo
+    if [[ $REPLY =~ ^[Nn]$ ]]; then echo "Abgebrochen."; exit 0; fi
     install_legacy_runtime; install_binaries; verify_runtime; create_config; write_yaml; create_service; create_cli_wrapper; install_python_deps
-    echo ""; echo -e "${GREEN}════════════════════════════════════════════${NC}"; echo -e "${GREEN}  Installation fertig!${NC}"; echo -e "${GREEN}════════════════════════════════════════════${NC}"; echo ""; echo "Alles steuern mit:"; echo ""; echo "  bch-node start     ← startet Node + Stratum + Dashboard"; echo "  bch-node status"; echo "  bch-node stop"; echo ""; echo "Dashboard dann unter:  http://DEINE_IP:5000"; echo "Stratum Port:          3333"; echo ""; echo "Zuerst Node syncen lassen:"; echo "  bch-node start"; echo "  bch-node status    # warten bis initialblockdownload = false"; echo ""
+    echo ""; echo -e "${GREEN}════════════════════════════════════════════${NC}"; echo -e "${GREEN}  Installation fertig!${NC}"; echo -e "${GREEN}════════════════════════════════════════════${NC}"; echo ""; echo "Alles steuern mit:"; echo "  bch-node start     ← startet Node + Stratum + Dashboard"; echo "  bch-node status"; echo "  bch-node stop"; echo ""; echo "Dashboard dann unter:  http://DEINE_IP:5000"; echo "Stratum Port:          3333"; echo ""; echo "Zuerst Node syncen lassen:"; echo "  bch-node start"; echo "  bch-node status    # warten bis initialblockdownload = false"; echo ""
 }
+
 main
