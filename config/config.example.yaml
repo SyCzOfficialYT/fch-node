@@ -1,45 +1,51 @@
-# fch-node Konfiguration
-# Kopiere diese Datei nach config.yaml und passe sie an
+# fch-node Konfiguration – Lazy Mining Edition
+# Kopiere nach config.yaml und passe an
 
 stratum:
   host: "0.0.0.0"
   port: 3333
-  # Start-Difficulty für kleine Miner (NerdQaxe++ ~4.8 TH/s)
-  start_difficulty: 1000
-  # VarDiff Ziel (Shares pro Minute)
+  start_difficulty: 1000          # gut für NerdQaxe++
   vardiff_target: 15
 
 rpc:
-  # FreeCash Node RPC
   host: "127.0.0.1"
-  port: 8332          # Standard freecashd RPC Port (anpassen falls nötig)
+  port: 8332
   user: "fchrpc"
   password: "CHANGE_ME_SECURE_PASSWORD"
-  # Timeout in Sekunden
   timeout: 30
 
-wallet:
-  # Adresse, die bei SOLO in die Coinbase geschrieben wird
-  address: "DEINE_FCH_WALLET_ADRESSE_HIER"
+# === Pool / Sammelstelle (Coinbase geht hierhin) ===
+pool_wallet:
+  # Generierte FCH-Adresse (Sammelstelle)
+  address: "FNBM516c6Erb5Zp5VxyzCG67z5fw3xNHRf"
+  # Private Key (WIF) – NUR lokal speichern, niemals committen in echte Secrets!
+  # Importiere diesen Key in freecashd mit: freecash-cli importprivkey "Kz7wY5wsvHcf1Y2ujkvKEhzxfY7D59KdE7YXUsxJ1QBGWQve53C9"
+  private_key_wif: "Kz7wY5wsvHcf1Y2ujkvKEhzxfY7D59KdE7YXUsxJ1QBGWQve53C9"
+  private_key_hex: "568b430765abc49b3fa765cf648f748d093b08dcc79eccf17148e638f38a0ac5"
 
-# Aktiver Modus: solo | pps | pplns
-mode: "solo"
+# === Deine DOGE Auszahlungs-Wallet ===
+payout:
+  doge_address: "DUNSBrrro71Yu9j7h7aGd3au9cUwydWuZn"
+  min_payout_doge: 5.0              # Mindestauszahlung in DOGE
+  # Interner Stand wird in FCH geführt und live in DOGE umgerechnet
 
-# Lazy Mining – FCH Amount → DOGE Äquivalent
+# Lazy Mining Umrechnung
 lazy_mining:
   enabled: true
-  # 1 FCH = X DOGE (manuell pflegen, da FCH oft keinen stabilen Preis hat)
-  fch_to_doge_rate: 0.0015
-  # Optional: automatischer Kurs von einer API (falls verfügbar)
-  use_api: false
+  # Fallback-Kurs falls API nicht erreichbar (1 FCH = X DOGE)
+  fch_to_doge_rate: 0.025
+  # Live-Kurs von CoinGecko versuchen
+  use_api: true
+  api_url: "https://api.coingecko.com/api/v3/simple/price?ids=freecash,dogecoin&vs_currencies=usd"
+
+# Modus (für Tracking)
+mode: "lazy"                        # lazy | solo | pps | pplns
 
 dashboard:
   host: "0.0.0.0"
   port: 5000
-  # Geheimnis für einfache Authentifizierung (optional)
   secret_key: "fch-local-secret-change-me"
 
-# Logging
 logging:
   level: "INFO"
   file: "logs/fch-node.log"

@@ -1,125 +1,78 @@
-# fch-node – Production Local FreeCash (FCH) Solo Pool
+# fch-node – FreeCash Lazy Mining (lokal)
 
-Echter lokaler Solo-Mining-Stratum-Server für FreeCash inkl. Flask-Monitoring.
+Lokaler Solo/Lazy-Pool für FreeCash mit automatischer Umrechnung in DOGE.
 
-**Kein Demo. Kein Fake.**  
-Der Server holt echte Block-Templates per `getblocktemplate` von deinem `freecashd`, baut Jobs, validiert Shares und reicht gefundene Blöcke per `submitblock` ein.
+## Konzept (wie Mining-Dutch Lazy)
 
----
-
-## Features
-
-- Echter **SOLO**-Betrieb gegen lokalen FreeCash-Node
-- Stratum V1 (kompatibel mit NerdQaxe++ und allen gängigen SHA256-ASICs)
-- Variable Start-Difficulty (Standard 1000 – ideal für ~5 TH/s Geräte)
-- Share-Validierung + automatische Block-Submission
-- Live-Dashboard (nur über die IP deines Rechners erreichbar)
-- Lazy FCH → DOGE Umrechnung im Dashboard
-- Docker & manuelle Installation
-- Stats-Persistenz
+1. Miner (NerdQaxe++) verbindet sich per Stratum
+2. Gefundene Blöcke gehen auf die **Pool-Wallet** (Sammelstelle)
+3. Interner Stand wird in FCH geführt
+4. Live-Umrechnung FCH → DOGE
+5. Bei Erreichen von **5 DOGE** → Auszahlung an deine DOGE-Wallet markiert
 
 ---
 
-## Voraussetzungen
+## Generierte Pool-Wallet (Sammelstelle)
 
-1. **FreeCash Full Node** (`freecashd`) muss laufen und **vollständig synchronisiert** sein.
-2. In der `freecash.conf` / Startparametern:
+| Feld | Wert |
+|------|------|
+| **FCH Adresse** | `FNBM516c6Erb5Zp5VxyzCG67z5fw3xNHRf` |
+| **WIF (Private Key)** | `Kz7wY5wsvHcf1Y2ujkvKEhzxfY7D59KdE7YXUsxJ1QBGWQve53C9` |
 
-```conf
-server=1
-rpcuser=fchrpc
-rpcpassword=DEIN_SICHERES_PASSWORT
-rpcallowip=127.0.0.1
-rpcport=8332
+**Wichtig:** Importiere den Private Key in deinen FreeCash-Node:
+
+```bash
+freecash-cli importprivkey "Kz7wY5wsvHcf1Y2ujkvKEhzxfY7D59KdE7YXUsxJ1QBGWQve53C9" "pool-wallet" false
+freecash-cli validateaddress "FNBM516c6Erb5Zp5VxyzCG67z5fw3xNHRf"
 ```
 
-3. Python 3.10+ **oder** Docker
+Danach gehört die Adresse deinem Node und kann die Coinbase empfangen.
 
 ---
 
-## Installation
+## Deine DOGE Auszahlung
+
+- Adresse: `DUNSBrrro71Yu9j7h7aGd3au9cUwydWuZn`
+- Mindestauszahlung: **5 DOGE**
+
+---
+
+## Setup
 
 ```bash
 git clone https://github.com/SyCzOfficialYT/fch-node.git
 cd fch-node
-
 cp config/config.example.yaml config/config.yaml
+
+# RPC-Zugangsdaten in config.yaml anpassen
 nano config/config.yaml
 ```
 
-**Wichtig in der Config:**
-
-```yaml
-rpc:
-  host: "127.0.0.1"
-  port: 8332
-  user: "fchrpc"
-  password: "DEIN_SICHERES_PASSWORT"
-
-wallet:
-  address: "DEINE_ECHTE_FCH_ADRESSE"
-
-mode: "solo"
-
-stratum:
-  start_difficulty: 1000   # gut für NerdQaxe++
-```
-
-### Start mit Docker
+Dann starten:
 
 ```bash
+# freecashd muss laufen + synchronisiert sein
 docker compose up -d --build
+# oder manuell:
+python stratum/server.py   # Terminal 1
+python monitor/app.py      # Terminal 2
 ```
 
-### Manueller Start
+## Miner (NerdQaxe++)
 
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-# Terminal 1
-python stratum/server.py
-
-# Terminal 2
-python monitor/app.py
 ```
-
----
-
-## Miner einstellen (NerdQaxe++)
-
-| Feld          | Wert                                      |
-|---------------|-------------------------------------------|
-| Pool URL      | `stratum+tcp://DEINE_LOKALE_IP:3333`     |
-| Username      | `deine_FCH_Adresse` oder `Adresse.worker1` |
-| Password      | `x` oder `d=1000`                         |
+URL:      stratum+tcp://DEINE_LOKALE_IP:3333
+User:     beliebiger_name   (z.B. nerdqaxe1)
+Password: x   oder   d=1000
+```
 
 Dashboard: `http://DEINE_LOKALE_IP:5000`
 
 ---
 
-## Architektur
+## Hinweis zur Umrechnung
 
-```
-NerdQaxe++  →  Stratum :3333  →  JobManager  →  freecashd (RPC)
-                     ↓
-              Share Validation
-                     ↓
-              submitblock (bei Netzwerk-Diff)
-                     ↓
-              logs/stats.json  ←  Flask Dashboard :5000
-```
+Der aktuelle Kurs wird wenn möglich live von CoinGecko geholt.  
+Fallback-Kurs steht in der Config (`fch_to_doge_rate`).
 
----
-
-## Hinweise / Bekannte Grenzen
-
-- Die Coinbase zahlt aktuell an eine Placeholder-ScriptPubKey. Für den produktiven Dauerbetrieb sollte die Adresse korrekt in ein P2PKH/P2SH-Script encodiert werden (kann erweitert werden).
-- Merkle-Tree-Aufbau ist vereinfacht. Für maximale Korrektheit bei vielen Transaktionen kann der volle Tree implementiert werden.
-- PPS / PPLNS sind als Tracking-Modi vorbereitet, der Kern ist echter SOLO.
-- Das System ist für **privates / lokales** Nutzen gedacht. Bei öffentlicher Freigabe brauchst du zusätzliche Absicherung (Rate-Limits, Auth, Firewall).
-
----
-
-Viel Erfolg beim echten Solo-Minen.
+Die echte DOGE-Überweisung musst du vorerst manuell auslösen, sobald das Dashboard „Auszahlung bereit“ anzeigt. Später kann Auto-Payout ergänzt werden.
