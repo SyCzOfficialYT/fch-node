@@ -25,6 +25,7 @@ DATA_DIR="$HOME/.bitcoincashII"
 CONF_FILE="$DATA_DIR/bitcoincashII.conf"
 SERVICE_NAME="bch2-node"
 CLI_WRAPPER="/usr/local/bin/bch-node"
+LD_CONF_FILE="/etc/ld.so.conf.d/bch2.conf"
 
 MINIUPNPC_VERSION="2.2.2"
 MINIUPNPC_URL="https://miniupnp.tuxfamily.org/files/miniupnpc-${MINIUPNPC_VERSION}.tar.gz"
@@ -91,68 +92,83 @@ install_legacy_runtime() {
     local miniupnpc_lib="$RUNTIME_DIR/libminiupnpc.so.17"
     local natpmp_lib="$RUNTIME_DIR/libnatpmp.so.1"
 
-    if [ -f "$miniupnpc_lib" ] && [ -f "$natpmp_lib" ]; then
-        echo -e "${GREEN}✓ Private BCH2 Runtime bereits vorhanden${NC}"
-        return
-    fi
-
-    echo -e "${YELLOW}BCH2 v${VERSION} benötigt libminiupnpc.so.17 und libnatpmp.so.1.${NC}"
-    echo "Die Libraries werden isoliert unter ${RUNTIME_DIR} gebaut."
-
     require_command curl
     require_command tar
     require_command make
     require_command cc
-
-    local runtime_tmp
-    runtime_tmp="$(mktemp -d)"
-
-    cleanup_runtime_tmp() { rm -rf "$runtime_tmp"; }
-    trap cleanup_runtime_tmp EXIT
+    require_command ldconfig
 
     $SUDO mkdir -p "$RUNTIME_DIR"
 
-    local miniupnpc_archive="$runtime_tmp/miniupnpc-${MINIUPNPC_VERSION}.tar.gz"
-    local natpmp_archive="$runtime_tmp/libnatpmp-${NATPMP_VERSION}.tar.gz"
+    if [ -f "$miniupnpc_lib" ] && [ -f "$natpmp_lib" ]; then
+        echo -e "${GREEN}✓ Private BCH2 Runtime bereits vorhanden${NC}"
+    else
+        echo -e "${YELLOW}BCH2 v${VERSION} benötigt libminiupnpc.so.17 und libnatpmp.so.1.${NC}"
+        echo "Die Libraries werden isoliert unter ${RUNTIME_DIR} gebaut."
 
-    echo -e "${CYAN}→ Lade miniupnpc ${MINIUPNPC_VERSION} herunter...${NC}"
-    download_archive "$MINIUPNPC_URL" "$miniupnpc_archive"
-    tar -xzf "$miniupnpc_archive" -C "$runtime_tmp"
+        local runtime_tmp
+        runtime_tmp="$(mktemp -d)"
+        trap 'rm -rf "$runtime_tmp"' RETURN
 
-    echo -e "${CYAN}→ Baue libminiupnpc.so.17...${NC}"
-    (
-        cd "$runtime_tmp/miniupnpc-${MINIUPNPC_VERSION}"
-        make -j"$(nproc)"
-    )
+        local miniupnpc_archive="$runtime_tmp/miniupnpc-${MINIUPNPC_VERSION}.tar.gz"
+        local natpmp_archive="$runtime_tmp/libnatpmp-${NATPMP_VERSION}.tar.gz"
 
-    local miniupnpc_built="$runtime_tmp/miniupnpc-${MINIUPNPC_VERSION}/libminiupnpc.so"
-    if [ ! -f "$miniupnpc_built" ]; then
-        echo -e "${RED}✗ miniupnpc Build erzeugte keine libminiupnpc.so.${NC}"
-        exit 1
+        echo -e "${CYAN}→ Lade miniupnpc ${MINIUPNPC_VERSION} herunter...${NC}"
+        download_archive "$MINIUPNPC_URL" "$miniupnpc_archive"
+        tar -xzf "$miniupnpc_archive" -C "$runtime_tmp"
+
+        echo -e "${CYAN}→ Baue libminiupnpc.so.17...${NC}"
+        (
+            cd "$runtime_tmp/miniupnpc-${MINIUPNPC_VERSION}"
+            make -j"$(nproc)"
+        )
+
+        local miniupnpc_built="$runtime_tmp/miniupnpc-${MINIUPNPC_VERSION}/libminiupnpc.so"
+        if [ ! -f "$miniupnpc_built" ]; then
+            echo -e "${RED}✗ miniupnpc Build erzeugte keine libminiupnpc.so.${NC}"
+            exit 1
+        fi
+        $SUDO install -Dm755 "$miniupnpc_built" "$miniupnpc_lib"
+
+        echo -e "${CYAN}→ Lade libnatpmp ${NATPMP_VERSION} herunter...${NC}"
+        download_archive "$NATPMP_URL" "$natpmp_archive"
+        tar -xzf "$natpmp_archive" -C "$runtime_tmp"
+
+        echo -e "${CYAN}→ Baue libnatpmp.so.1...${NC}"
+        (
+            cd "$runtime_tmp/libnatpmp-${NATPMP_VERSION}"
+            make -j"$(nproc)"
+        )
+
+        local natpmp_built="$runtime_tmp/libnatpmp-${NATPMP_VERSION}/libnatpmp.so"
+        if [ ! -f "$natpmp_built" ]; then
+            echo -e "${RED}✗ libnatpmp Build erzeugte keine libnatpmp.so.${NC}"
+            exit 1
+        fi
+        $SUDO install -Dm755 "$natpmp_built" "$natpmp_lib"
+
+        rm -rf "$runtime_tmp"
+        trap - RETURN
+        echo -e "${GREEN}✓ Private BCH2 Runtime installiert${NC}"
     fi
-    $SUDO install -Dm755 "$miniupnpc_built" "$RUNTIME_DIR/libminiupnpc.so.17"
 
-    echo -e "${CYAN}→ Lade libnatpmp ${NATPMP_VERSION} herunter...${NC}"
-    download_archive "$NATPMP_URL" "$natpmp_archive"
-    tar -xzf "$natpmp_archive" -C "$runtime_tmp"
-
-    echo -e "${CYAN}→ Baue libnatpmp.so.1...${NC}"
-    (
-        cd "$runtime_tmp/libnatpmp-${NATPMP_VERSION}"
-        make -j"$(nproc)"
-    )
-
-    local natpmp_built="$runtime_tmp/libnatpmp-${NATPMP_VERSION}/libnatpmp.so"
-    if [ ! -f "$natpmp_built" ]; then
-        echo -e "${RED}✗ libnatpmp Build erzeugte keine libnatpmp.so.${NC}"
-        exit 1
-    fi
-    $SUDO install -Dm755 "$natpmp_built" "$RUNTIME_DIR/libnatpmp.so.1"
+    # Register only the private BCH2 directory with the dynamic linker.
+    # This makes the legacy SONAMEs available system-wide without replacing
+    # the newer distro-provided miniupnpc library.
+    echo "$RUNTIME_DIR" | $SUDO tee "$LD_CONF_FILE" >/dev/null
     $SUDO chmod 755 "$RUNTIME_DIR"/*.so*
+    $SUDO ldconfig
 
-    rm -rf "$runtime_tmp"
-    trap - EXIT
-    echo -e "${GREEN}✓ Private BCH2 Runtime installiert${NC}"
+    if ! $SUDO ldconfig -p | grep -q 'libminiupnpc.so.17'; then
+        echo -e "${RED}✗ libminiupnpc.so.17 wurde vom Dynamic Linker nicht registriert.${NC}"
+        exit 1
+    fi
+    if ! $SUDO ldconfig -p | grep -q 'libnatpmp.so.1'; then
+        echo -e "${RED}✗ libnatpmp.so.1 wurde vom Dynamic Linker nicht registriert.${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}✓ BCH2 Runtime im Dynamic Linker registriert${NC}"
 }
 
 install_binaries() {
@@ -162,23 +178,24 @@ install_binaries() {
     local tmpdir bindir
     tmpdir="$(mktemp -d)"
     trap 'rm -rf "$tmpdir"' RETURN
-    cd "$tmpdir"
 
-    download_archive "$DOWNLOAD_URL" "$ASSET"
+    download_archive "$DOWNLOAD_URL" "$tmpdir/$ASSET"
     echo -e "${CYAN}→ Entpacke...${NC}"
-    tar -xzf "$ASSET"
+    tar -xzf "$tmpdir/$ASSET" -C "$tmpdir"
 
-    bindir="$(find . -type f -name bitcoincashIId -printf '%h\n' | head -n1)"
+    bindir="$(find "$tmpdir" -type f -name bitcoincashIId -printf '%h\n' | head -n1)"
     if [ -z "$bindir" ] || [ ! -f "$bindir/bitcoincashII-cli" ]; then
         echo -e "${RED}✗ BCH2 Binaries wurden im Release-Archiv nicht gefunden.${NC}"
         exit 1
     fi
 
+    echo -e "${CYAN}→ Stoppe vorhandene Node vor dem Binary-Update...${NC}"
+    $SUDO systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+
     echo -e "${CYAN}→ Installiere Binaries...${NC}"
     $SUDO install -Dm755 "$bindir/bitcoincashIId" "$INSTALL_DIR/bitcoincashIId"
     $SUDO install -Dm755 "$bindir/bitcoincashII-cli" "$INSTALL_DIR/bitcoincashII-cli"
 
-    cd /
     rm -rf "$tmpdir"
     trap - RETURN
     echo -e "${GREEN}✓ Binaries installiert${NC}"
@@ -189,7 +206,7 @@ verify_runtime() {
     echo -e "${CYAN}→ Prüfe BCH2 Runtime-Abhängigkeiten...${NC}"
 
     local deps
-    deps="$(LD_LIBRARY_PATH="$RUNTIME_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$INSTALL_DIR/bitcoincashIId")"
+    deps="$(ldd "$INSTALL_DIR/bitcoincashIId")"
 
     if echo "$deps" | grep -q 'libminiupnpc.so.17 => not found'; then
         echo -e "${RED}✗ libminiupnpc.so.17 wird weiterhin nicht gefunden.${NC}"
@@ -217,51 +234,50 @@ create_config() {
 
         if [ -n "$existing_pass" ]; then
             RPC_PASS="$existing_pass"
-            echo -e "${GREEN}✓ Vorhandenes RPC-Passwort gefunden – wird beibehalten.${NC}"
             [ -n "$existing_user" ] && RPC_USER="$existing_user" || RPC_USER="bch2rpc"
-            return
+            echo -e "${GREEN}✓ Vorhandene RPC-Zugangsdaten werden beibehalten.${NC}"
+        else
+            RPC_USER="bch2rpc"
+            RPC_PASS="$(generate_rpc_password)"
+            if grep -q '^rpcpassword=' "$CONF_FILE"; then
+                sed -i "s|^rpcpassword=.*$|rpcpassword=${RPC_PASS}|" "$CONF_FILE"
+            else
+                printf '\nrpcpassword=%s\n' "$RPC_PASS" >> "$CONF_FILE"
+            fi
+            if grep -q '^rpcuser=' "$CONF_FILE"; then
+                sed -i "s|^rpcuser=.*$|rpcuser=${RPC_USER}|" "$CONF_FILE"
+            else
+                printf 'rpcuser=%s\n' "$RPC_USER" >> "$CONF_FILE"
+            fi
+            echo -e "${GREEN}✓ RPC-Zugangsdaten repariert${NC}"
         fi
-
-        echo -e "${YELLOW}⚠ Vorhandene Node-Config enthält kein RPC-Passwort.${NC}"
-        echo "Erzeuge ein neues RPC-Passwort und repariere die bestehende Config."
-        RPC_PASS="$(generate_rpc_password)"
+    else
         RPC_USER="bch2rpc"
-
-        if grep -q '^rpcpassword=' "$CONF_FILE"; then
-            sed -i "s|^rpcpassword=.*$|rpcpassword=${RPC_PASS}|" "$CONF_FILE"
-        else
-            printf '\nrpcpassword=%s\n' "$RPC_PASS" >> "$CONF_FILE"
-        fi
-
-        if grep -q '^rpcuser=' "$CONF_FILE"; then
-            sed -i "s|^rpcuser=.*$|rpcuser=${RPC_USER}|" "$CONF_FILE"
-        else
-            printf 'rpcuser=%s\n' "$RPC_USER" >> "$CONF_FILE"
-        fi
-
-        chmod 600 "$CONF_FILE"
-        echo -e "${GREEN}✓ RPC-Zugangsdaten repariert${NC}"
-        return
-    fi
-
-    RPC_USER="bch2rpc"
-    RPC_PASS="$(generate_rpc_password)"
-
-    cat > "$CONF_FILE" << CONFEOF
+        RPC_PASS="$(generate_rpc_password)"
+        cat > "$CONF_FILE" << CONFEOF
 # BCH2 Node Config – generiert vom Installer
 server=1
 daemon=1
 listen=1
 port=8339
 rpcport=8342
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
 rpcuser=${RPC_USER}
 rpcpassword=${RPC_PASS}
-rpcallowip=127.0.0.1
 txindex=1
 CONFEOF
+        echo -e "${GREEN}✓ Node-Config erstellt${NC}"
+    fi
 
+    # Keep the existing config secure and ensure rpcbind is explicit.
+    if ! grep -q '^rpcbind=' "$CONF_FILE"; then
+        sed -i '/^rpcport=/a rpcbind=127.0.0.1' "$CONF_FILE"
+    fi
+    if ! grep -q '^rpcallowip=' "$CONF_FILE"; then
+        sed -i '/^rpcbind=/a rpcallowip=127.0.0.1' "$CONF_FILE"
+    fi
     chmod 600 "$CONF_FILE"
-    echo -e "${GREEN}✓ Node-Config erstellt${NC}"
 }
 
 write_yaml() {
@@ -307,7 +323,7 @@ YAMLEOF
         sed -i "/^rpc:/a\\  user: \"${RPC_USER}\"" "$YAML_FILE"
     fi
 
-    echo -e "${GREEN}✓ config/config.yaml mit den RPC-Zugangsdaten synchronisiert${NC}"
+    echo -e "${GREEN}✓ config/config.yaml synchronisiert${NC}"
 }
 
 create_service() {
@@ -361,7 +377,23 @@ STRATUM_PIDFILE="/tmp/bch2-stratum.pid"
 MONITOR_PIDFILE="/tmp/bch2-monitor.pid"
 
 run_cli() {
-    LD_LIBRARY_PATH="\$RUNTIME_DIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}" "\$CLI" -conf="\$CONF" "\$@"
+    local rpc_user rpc_pass
+    rpc_user="\$(sed -n 's/^rpcuser=//p' "\$CONF" | head -n1)"
+    rpc_pass="\$(sed -n 's/^rpcpassword=//p' "\$CONF" | head -n1)"
+
+    if [ -z "\$rpc_user" ] || [ -z "\$rpc_pass" ]; then
+        echo "RPC credentials fehlen in \$CONF" >&2
+        return 1
+    fi
+
+    LD_LIBRARY_PATH="\$RUNTIME_DIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}" \\
+        "\$CLI" \\
+        -conf="\$CONF" \\
+        -rpcconnect=127.0.0.1 \\
+        -rpcport=8342 \\
+        -rpcuser="\$rpc_user" \\
+        -rpcpassword="\$rpc_pass" \\
+        "\$@"
 }
 
 get_local_ip() {
@@ -422,7 +454,7 @@ stop_stack() {
     echo "Alles gestoppt."
 }
 
-case "\$1" in
+case "\${1:-}" in
     start)
         start_stack
         ;;
