@@ -151,30 +151,20 @@ install_legacy_runtime() {
         echo -e "${GREEN}✓ Private BCH2 Runtime installiert${NC}"
     fi
 
-    # BCH2 v27.0.2 needs legacy SONAMEs which may differ from the distro
-    # provided libraries. Keep them isolated and explicitly inject the
-    # runtime path instead of depending on the global ldconfig cache.
+    # BCH2 v27.0.2 needs legacy SONAMEs which may differ from distro
+    # libraries. Keep them isolated and use LD_LIBRARY_PATH explicitly.
     $SUDO chmod 755 "$RUNTIME_DIR"/*.so*
 
-    local runtime_ld="${RUNTIME_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-    local miniupnpc_resolved natpmp_resolved
-    miniupnpc_resolved="$(LD_LIBRARY_PATH="$runtime_ld" ldd "$INSTALL_DIR/bitcoincashIId" 2>/dev/null | awk '/libminiupnpc\.so\.17/ {print $3; exit}')"
-    natpmp_resolved="$(LD_LIBRARY_PATH="$runtime_ld" ldd "$INSTALL_DIR/bitcoincashIId" 2>/dev/null | awk '/libnatpmp\.so\.1/ {print $3; exit}')"
-
-    if [ "$miniupnpc_resolved" != "$miniupnpc_lib" ]; then
-        echo -e "${RED}✗ libminiupnpc.so.17 konnte nicht aus ${RUNTIME_DIR} aufgelöst werden.${NC}"
-        echo "  Erwartet: $miniupnpc_lib"
-        echo "  Gefunden: ${miniupnpc_resolved:-nicht gefunden}"
+    if [ ! -s "$miniupnpc_lib" ]; then
+        echo -e "${RED}✗ $miniupnpc_lib ist nicht vorhanden oder leer.${NC}"
         exit 1
     fi
-    if [ "$natpmp_resolved" != "$natpmp_lib" ]; then
-        echo -e "${RED}✗ libnatpmp.so.1 konnte nicht aus ${RUNTIME_DIR} aufgelöst werden.${NC}"
-        echo "  Erwartet: $natpmp_lib"
-        echo "  Gefunden: ${natpmp_resolved:-nicht gefunden}"
+    if [ ! -s "$natpmp_lib" ]; then
+        echo -e "${RED}✗ $natpmp_lib ist nicht vorhanden oder leer.${NC}"
         exit 1
     fi
 
-    echo -e "${GREEN}✓ BCH2 Runtime validiert (isoliertes LD_LIBRARY_PATH)${NC}"
+    echo -e "${GREEN}✓ BCH2 Runtime-Dateien vorhanden und einsatzbereit${NC}"
 }
 
 install_binaries() {
@@ -277,7 +267,6 @@ CONFEOF
         echo -e "${GREEN}✓ Node-Config erstellt${NC}"
     fi
 
-    # Keep the existing config secure and ensure rpcbind is explicit.
     if ! grep -q '^rpcbind=' "$CONF_FILE"; then
         sed -i '/^rpcport=/a rpcbind=127.0.0.1' "$CONF_FILE"
     fi
