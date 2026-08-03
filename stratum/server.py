@@ -95,7 +95,15 @@ def sha256d(data: bytes) -> bytes:
 
 
 def reverse_hex(value: str) -> str:
-    return binascii.hexlify(binascii.unhexlify(value)[::-1]).decode()
+    # ESP-Miner expects the Stratum prevhash with 32-bit words reversed,
+    # not a byte-for-byte reversal. Its BM job construction reverses the
+    # bytes inside each word and then reverses the word order again when
+    # constructing the SHA-256 header. Sending a full byte reversal here
+    # therefore makes the server validate a different header than the ASIC.
+    raw = binascii.unhexlify(value)
+    if len(raw) != 32:
+        raise ValueError("prevhash must be exactly 32 bytes")
+    return binascii.hexlify(b''.join(raw[i:i + 4] for i in range(28, -1, -4))).decode()
 
 
 def encode_varint(n: int) -> bytes:
