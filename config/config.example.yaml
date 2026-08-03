@@ -8,8 +8,8 @@ rpc:
   timeout: 30
 
 pool:
-  # Deine BCH2 Auszahlungsadresse (bitcoincashii:q...)
-  payout_address: "bitcoincashii:qxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  # Deine BCH2 Auszahlungsadresse
+  payout_address: "bitcoincashii:qqssqww4u4rldtl04gshuqvrledjhuwy95ytdyw0xa"
   
   # Stratum Port (NerdQaxe verbindet sich hierhin)
   stratum_port: 3333
@@ -24,10 +24,8 @@ pool:
 monitor:
   host: "0.0.0.0"
   port: 5000
-  # Nur lokale IPs erlauben (kein öffentlicher Zugriff)
   allowed_ips: []
 
-# Optional: Logging
 logging:
   level: "INFO"
   file: "logs/bch2-node.log"
