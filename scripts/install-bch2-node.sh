@@ -121,7 +121,7 @@ install_legacy_runtime() {
     local miniupnpc_archive="$runtime_tmp/miniupnpc-${MINIUPNPC_VERSION}.tar.gz"
     local natpmp_archive="$runtime_tmp/libnatpmp-${NATPMP_VERSION}.tar.gz"
 
-    mkdir -p "$RUNTIME_DIR"
+    $SUDO mkdir -p "$RUNTIME_DIR"
 
     echo -e "${CYAN}→ Lade miniupnpc ${MINIUPNPC_VERSION} herunter...${NC}"
     download_archive "$MINIUPNPC_URL" "$miniupnpc_archive"
