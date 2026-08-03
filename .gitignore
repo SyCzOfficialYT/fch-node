@@ -1,0 +1,7 @@
+# Local runtime configuration containing generated RPC credentials
+config/config.yaml
+
+# Runtime logs / local state
+logs/
+*.log
+/tmp/
