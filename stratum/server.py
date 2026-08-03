@@ -6,8 +6,6 @@ BCH2 Production Solo Stratum Server
 - Block Header Konstruktion
 - submitblock bei gültigem Block
 - RPC credentials are loaded from the BCH2 node config at request time
-  so an installer/config update cannot leave a long-running Stratum process
-  using stale RPC credentials.
 """
 
 import socket
@@ -50,12 +48,10 @@ log = logging.getLogger("bch2-stratum")
 
 
 def _read_node_rpc_credentials() -> Tuple[Optional[str], Optional[str]]:
-    """Read the node's authoritative rpcuser/rpcpassword from bitcoincashII.conf."""
     try:
         if not NODE_CONF_PATH.is_file():
             return None, None
-        user = None
-        password = None
+        user = password = None
         with NODE_CONF_PATH.open(encoding="utf-8") as f:
             for raw_line in f:
                 line = raw_line.strip()
@@ -75,20 +71,13 @@ def _read_node_rpc_credentials() -> Tuple[Optional[str], Optional[str]]:
 def rpc(method: str, params=None):
     if params is None:
         params = []
-
     node_user, node_pass = _read_node_rpc_credentials()
     rpc_user = node_user or RPC_USER
     rpc_pass = node_pass or RPC_PASS
-
     url = f"http://{RPC_HOST}:{RPC_PORT}"
     payload = {"jsonrpc": "1.0", "id": "stratum", "method": method, "params": params}
     try:
-        r = requests.post(
-            url,
-            json=payload,
-            auth=HTTPBasicAuth(rpc_user, rpc_pass),
-            timeout=60,
-        )
+        r = requests.post(url, json=payload, auth=HTTPBasicAuth(rpc_user, rpc_pass), timeout=60)
         r.raise_for_status()
         data = r.json()
         if data.get("error"):
@@ -112,12 +101,11 @@ def reverse_hex(h: str) -> str:
 def encode_varint(n: int) -> bytes:
     if n < 0xfd:
         return struct.pack("<B", n)
-    elif n <= 0xffff:
+    if n <= 0xffff:
         return struct.pack("<BH", 0xfd, n)
-    elif n <= 0xffffffff:
+    if n <= 0xffffffff:
         return struct.pack("<BI", 0xfe, n)
-    else:
-        return struct.pack("<BQ", 0xff, n)
+    return struct.pack("<BQ", 0xff, n)
 
 
 def bits_to_target(nbits: str) -> int:
@@ -125,10 +113,8 @@ def bits_to_target(nbits: str) -> int:
     exponent = bits >> 24
     mantissa = bits & 0xffffff
     if exponent <= 3:
-        target = mantissa >> (8 * (3 - exponent))
-    else:
-        target = mantissa << (8 * (exponent - 3))
-    return target
+        return mantissa >> (8 * (3 - exponent))
+    return mantissa << (8 * (exponent - 3))
 
 
 def difficulty_to_target(diff: float) -> int:
@@ -162,7 +148,6 @@ def _convertbits(data: List[int], frombits: int, tobits: int, pad: bool) -> List
     ret: List[int] = []
     maxv = (1 << tobits) - 1
     max_acc = (1 << (frombits + tobits - 1)) - 1
-
     for value in data:
         if value < 0 or value >> frombits:
             raise ValueError("Invalid CashAddr data value")
@@ -171,7 +156,6 @@ def _convertbits(data: List[int], frombits: int, tobits: int, pad: bool) -> List
         while bits >= tobits:
             bits -= tobits
             ret.append((acc >> bits) & maxv)
-
     if pad:
         if bits:
             ret.append((acc << (tobits - bits)) & maxv)
@@ -180,99 +164,67 @@ def _convertbits(data: List[int], frombits: int, tobits: int, pad: bool) -> List
             raise ValueError("Invalid CashAddr padding")
         if ((acc << (tobits - bits)) & maxv) != 0:
             raise ValueError("Non-zero CashAddr padding")
-
     return ret
 
 
 def cashaddr_decode(addr: str) -> Tuple[int, bytes]:
-    """Decode and validate a Bitcoin Cash CashAddr address.
-
-    The previous implementation treated the 5-bit CashAddr payload as if it
-    were byte-aligned. That silently produced a malformed hash160 and caused
-    every normal 20-byte P2PKH address to fall through to validateaddress.
-    """
     addr = addr.strip()
     if not addr:
         raise ValueError("Empty CashAddr")
     if any(c.isupper() for c in addr) and any(c.islower() for c in addr):
         raise ValueError("Mixed-case CashAddr")
-
     addr = addr.lower()
     if ":" not in addr:
         raise ValueError("CashAddr prefix is required")
-
     prefix, payload = addr.split(":", 1)
     if not prefix or not payload:
         raise ValueError("Invalid CashAddr prefix or payload")
-
     try:
         data = [CHARSET_REV[c] for c in payload]
     except KeyError as exc:
         raise ValueError(f"Invalid CashAddr character: {exc.args[0]}") from None
-
     if len(data) < 9:
         raise ValueError("CashAddr too short")
-
     if _cashaddr_polymod(_cashaddr_prefix_expand(prefix) + data) != 1:
         raise ValueError("Invalid CashAddr checksum")
-
-    payload_data = data[:-8]
-    decoded = bytes(_convertbits(payload_data, 5, 8, False))
-    if len(decoded) < 1:
+    decoded = bytes(_convertbits(data[:-8], 5, 8, False))
+    if not decoded:
         raise ValueError("CashAddr payload is empty")
-
     version = decoded[0]
-    hash160 = decoded[1:]
-
-    # CashAddr version is 5 bits. BCH currently uses version 0 (P2PKH) and
-    # version 1 (P2SH); reject unknown versions instead of constructing a
-    # potentially incorrect coinbase output.
+    payload_bytes = decoded[1:]
     if version > 31:
         raise ValueError("Invalid CashAddr version")
-
-    return version, hash160
+    return version, payload_bytes
 
 
 def address_to_scriptpubkey(addr: str) -> bytes:
     version, payload = cashaddr_decode(addr)
-    if len(payload) not in (20, 24, 28, 32, 40, 48, 56, 64):
-        raise ValueError(f"Invalid CashAddr payload length: {len(payload)}")
-
     if version == 0:
         if len(payload) != 20:
             raise ValueError("P2PKH CashAddr must contain a 20-byte hash160")
         return b"\x76\xa9\x14" + payload + b"\x88\xac"
-
     if version == 1:
         if len(payload) != 20:
             raise ValueError("P2SH CashAddr must contain a 20-byte hash160")
         return b"\xa9\x14" + payload + b"\x87"
-
     raise ValueError(f"Unsupported CashAddr version: {version}")
 
 
 def serialize_coinbase_tx(height: int, value_sats: int, script_pubkey: bytes, extranonce1: bytes, extranonce2: bytes) -> bytes:
-    if height < 17:
-        height_script = bytes([height])
-    else:
-        h_bytes = b""
-        h = height
-        while h > 0:
-            h_bytes += bytes([h & 0xff])
-            h >>= 8
-        height_script = bytes([len(h_bytes)]) + h_bytes
+    h_bytes = b""
+    h = height
+    while h > 0:
+        h_bytes += bytes([h & 0xff])
+        h >>= 8
+    height_script = bytes([len(h_bytes)]) + h_bytes
     script_sig = height_script + extranonce1 + extranonce2 + b"/BCH2-Solo/"
-    tx = b""
-    tx += struct.pack("<I", 2)
-    tx += b"\x01"
-    tx += b"\x00" * 32
-    tx += struct.pack("<I", 0xffffffff)
-    tx += encode_varint(len(script_sig)) + script_sig
-    tx += struct.pack("<I", 0xffffffff)
-    tx += b"\x01"
-    tx += struct.pack("<Q", value_sats)
-    tx += encode_varint(len(script_pubkey)) + script_pubkey
-    tx += struct.pack("<I", 0)
+    if not 2 <= len(script_sig) <= 100:
+        raise ValueError(f"Coinbase scriptSig length {len(script_sig)} outside 2..100")
+    tx = struct.pack("<I", 2)
+    tx += b"\x01" + b"\x00" * 32 + struct.pack("<I", 0xffffffff)
+    tx += encode_varint(len(script_sig)) + script_sig + struct.pack("<I", 0xffffffff)
+    tx += b"\x01" + struct.pack("<Q", value_sats)
+    tx += encode_varint(len(script_pubkey)) + script_pubkey + struct.pack("<I", 0)
     return tx
 
 
@@ -281,12 +233,9 @@ def merkle_root_from_tx_hashes(tx_hashes: List[bytes]) -> bytes:
         return b"\x00" * 32
     layer = tx_hashes[:]
     while len(layer) > 1:
-        if len(layer) % 2 == 1:
+        if len(layer) % 2:
             layer.append(layer[-1])
-        next_layer = []
-        for i in range(0, len(layer), 2):
-            next_layer.append(sha256d(layer[i] + layer[i + 1]))
-        layer = next_layer
+        layer = [sha256d(layer[i] + layer[i + 1]) for i in range(0, len(layer), 2)]
     return layer[0]
 
 
@@ -302,33 +251,46 @@ class Job:
         self.script_pubkey = script_pubkey
         self.job_id = f"{int(time.time())}_{self.height}"
         self.target = bits_to_target(self.nbits)
-        self.extranonce1 = struct.pack(">I", int(time.time()) & 0xffffffff)
-        self.tx_hashes = []
-        for tx in template.get("transactions", []):
-            txid = binascii.unhexlify(tx["txid"])[::-1]
-            self.tx_hashes.append(txid)
+        self.tx_hashes = [binascii.unhexlify(tx["txid"])[::-1] for tx in template.get("transactions", [])]
 
-    def build_coinbase(self, extranonce2: bytes) -> bytes:
-        return serialize_coinbase_tx(self.height, self.coinbase_value, self.script_pubkey, self.extranonce1, extranonce2)
+    def build_coinbase(self, extranonce1: bytes, extranonce2: bytes) -> bytes:
+        return serialize_coinbase_tx(self.height, self.coinbase_value, self.script_pubkey, extranonce1, extranonce2)
+
+    def coinbase_parts(self, extranonce1: bytes) -> Tuple[bytes, bytes]:
+        h = self.height
+        h_bytes = b""
+        while h > 0:
+            h_bytes += bytes([h & 0xff])
+            h >>= 8
+        height_script = bytes([len(h_bytes)]) + h_bytes
+        script_sig = height_script + extranonce1 + (b"\x00" * 4) + b"/BCH2-Solo/"
+        if not 2 <= len(script_sig) <= 100:
+            raise ValueError(f"Coinbase scriptSig length {len(script_sig)} outside 2..100")
+        prefix = struct.pack("<I", 2)
+        prefix += b"\x01" + b"\x00" * 32 + struct.pack("<I", 0xffffffff)
+        prefix += encode_varint(len(script_sig)) + height_script + extranonce1
+        suffix = b"\x00" * 4 + b"/BCH2-Solo/" + struct.pack("<I", 0xffffffff)
+        suffix += b"\x01" + struct.pack("<Q", self.coinbase_value)
+        suffix += encode_varint(len(self.script_pubkey)) + self.script_pubkey + struct.pack("<I", 0)
+        return prefix, suffix
 
     def build_merkle_root(self, coinbase_tx: bytes) -> bytes:
-        coinbase_hash = sha256d(coinbase_tx)
-        return merkle_root_from_tx_hashes([coinbase_hash] + self.tx_hashes)
+        return merkle_root_from_tx_hashes([sha256d(coinbase_tx)] + self.tx_hashes)
 
-    def build_header(self, merkle_root: bytes, ntime: int, nonce: int) -> bytes:
-        header = b""
-        header += struct.pack("<I", self.version)
-        header += binascii.unhexlify(self.prevhash)[::-1]
-        header += merkle_root
-        header += struct.pack("<I", ntime)
-        header += struct.pack("<I", int(self.nbits, 16))
-        header += struct.pack("<I", nonce)
-        return header
+    def build_header(self, merkle_root: bytes, ntime: int, nonce: int, version: Optional[int] = None) -> bytes:
+        header_version = self.version if version is None else version
+        return (
+            struct.pack("<I", header_version)
+            + binascii.unhexlify(self.prevhash)[::-1]
+            + merkle_root
+            + struct.pack("<I", ntime)
+            + struct.pack("<I", int(self.nbits, 16))
+            + struct.pack("<I", nonce)
+        )
 
     def build_block(self, coinbase_tx: bytes, header: bytes) -> bytes:
         block = header
-        tx_count = 1 + len(self.template.get("transactions", []))
-        block += encode_varint(tx_count)
+        block += encode_varint(1 + len(self.template.get("transactions", [])))
         block += coinbase_tx
         for tx in self.template.get("transactions", []):
             block += binascii.unhexlify(tx["data"])
@@ -405,8 +367,7 @@ class StratumClient(threading.Thread):
     def handle_subscribe(self, msg_id):
         self.extranonce1 = struct.pack(">I", int(time.time() * 1000) & 0xffffffff)
         en1_hex = binascii.hexlify(self.extranonce1).decode()
-        result = [[["mining.notify", "bch2solo"], ["mining.set_difficulty", "bch2solo"]], en1_hex, 4]
-        self.send({"id": msg_id, "result": result, "error": None})
+        self.send({"id": msg_id, "result": [[["mining.notify", "bch2solo"], ["mining.set_difficulty", "bch2solo"]], en1_hex, 4], "error": None})
 
     def handle_authorize(self, msg_id, params):
         self.worker = params[0] if params else "unknown"
@@ -418,15 +379,24 @@ class StratumClient(threading.Thread):
     def send_job(self):
         with job_lock:
             job = current_job
-        if not job:
+        if not job or self.extranonce1 is None:
             return
         prevhash_swab = reverse_hex(job.prevhash)
         version_hex = f"{job.version:08x}"
         nbits_hex = job.nbits if len(job.nbits) == 8 else f"{int(job.nbits, 16):08x}"
         ntime_hex = f"{job.ntime:08x}"
-        coinb1 = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff"
-        coinb2 = "ffffffff01" + "00" * 8 + "00000000"
-        params = [job.job_id, prevhash_swab, coinb1, coinb2, [], version_hex, nbits_hex, ntime_hex, True]
+        coinb1, coinb2 = job.coinbase_parts(self.extranonce1)
+        params = [
+            job.job_id,
+            prevhash_swab,
+            binascii.hexlify(coinb1).decode(),
+            binascii.hexlify(coinb2).decode(),
+            [],
+            version_hex,
+            nbits_hex,
+            ntime_hex,
+            True,
+        ]
         self.send({"id": None, "method": "mining.notify", "params": params})
 
     def handle_submit(self, msg_id, params):
@@ -434,6 +404,7 @@ class StratumClient(threading.Thread):
             self.send({"id": msg_id, "result": False, "error": [20, "Invalid params", None]})
             return
         worker, job_id, en2_hex, ntime_hex, nonce_hex = params[:5]
+        version_hex = params[5] if len(params) >= 6 else None
         self.shares += 1
         with job_lock:
             job = current_job
@@ -442,15 +413,21 @@ class StratumClient(threading.Thread):
             return
         try:
             extranonce2 = binascii.unhexlify(en2_hex)
+            if len(extranonce2) != 4:
+                raise ValueError("extranonce2 must be 4 bytes")
             ntime = int(ntime_hex, 16)
             nonce = int(nonce_hex, 16)
+            submitted_version = int(version_hex, 16) if version_hex is not None else job.version
         except Exception:
             self.send({"id": msg_id, "result": False, "error": [20, "Bad hex", None]})
             return
+        if submitted_version & ~0xFFFFFFFF:
+            self.send({"id": msg_id, "result": False, "error": [20, "Invalid version", None]})
+            return
         try:
-            coinbase_tx = job.build_coinbase(extranonce2)
+            coinbase_tx = job.build_coinbase(self.extranonce1, extranonce2)
             merkle = job.build_merkle_root(coinbase_tx)
-            header = job.build_header(merkle, ntime, nonce)
+            header = job.build_header(merkle, ntime, nonce, submitted_version)
             header_hash = sha256d(header)
             hash_int = int.from_bytes(header_hash[::-1], "big")
         except Exception as e:
