@@ -1,14 +1,13 @@
 # fch-node – FreeCash Lazy Mining (lokal)
 
-Lokaler Solo/Lazy-Pool für FreeCash mit automatischer Umrechnung in DOGE.
+Lokaler Solo/Lazy-Pool für FreeCash mit Wert-Umrechnung in DOGE.
 
-## Konzept (wie Mining-Dutch Lazy)
+## Konzept
 
-1. Miner (NerdQaxe++) verbindet sich per Stratum
-2. Gefundene Blöcke gehen auf die **Pool-Wallet** (Sammelstelle)
-3. Interner Stand wird in FCH geführt
-4. Live-Umrechnung FCH → DOGE
-5. Bei Erreichen von **5 DOGE** → Auszahlung an deine DOGE-Wallet markiert
+1. NerdQaxe++ minet an deinem lokalen Pool
+2. Gefundene Blöcke landen auf der **Pool-Wallet** (Sammelstelle)
+3. Dashboard zeigt FCH-Stand + ungefähren DOGE-Wert
+4. Ab ca. **5 DOGE** Gegenwert → du verkaufst die FCH und schickst DOGE auf deine TrustWallet
 
 ---
 
@@ -16,24 +15,81 @@ Lokaler Solo/Lazy-Pool für FreeCash mit automatischer Umrechnung in DOGE.
 
 | Feld | Wert |
 |------|------|
-| **FCH Adresse** | `FNBM516c6Erb5Zp5VxyzCG67z5fw3xNHRf` |
-| **WIF (Private Key)** | `Kz7wY5wsvHcf1Y2ujkvKEhzxfY7D59KdE7YXUsxJ1QBGWQve53C9` |
+| **FCH-Adresse** | `FNBM516c6Erb5Zp5VxyzCG67z5fw3xNHRf` |
+| **Private Key (WIF)** | `Kz7wY5wsvHcf1Y2ujkvKEhzxfY7D59KdE7YXUsxJ1QBGWQve53C9` |
 
-**Wichtig:** Importiere den Private Key in deinen FreeCash-Node:
+### Private Key importieren (einmalig)
 
 ```bash
 freecash-cli importprivkey "Kz7wY5wsvHcf1Y2ujkvKEhzxfY7D59KdE7YXUsxJ1QBGWQve53C9" "pool-wallet" false
 freecash-cli validateaddress "FNBM516c6Erb5Zp5VxyzCG67z5fw3xNHRf"
 ```
 
-Danach gehört die Adresse deinem Node und kann die Coinbase empfangen.
+### Kontostand prüfen
+
+```bash
+freecash-cli getbalance
+freecash-cli listunspent 0 9999999 "[\"FNBM516c6Erb5Zp5VxyzCG67z5fw3xNHRf\"]"
+```
 
 ---
 
 ## Deine DOGE Auszahlung
 
-- Adresse: `DUNSBrrro71Yu9j7h7aGd3au9cUwydWuZn`
-- Mindestauszahlung: **5 DOGE**
+- Adresse (TrustWallet): `DUNSBrrro71Yu9j7h7aGd3au9cUwydWuZn`
+- Ziel: ab ca. **5 DOGE** Gegenwert auszahlen
+
+---
+
+## Kompletter Ablauf – Schritt für Schritt
+
+### 1. Mining
+NerdQaxe++ verbindet sich mit:
+```
+stratum+tcp://DEINE_LOKALE_IP:3333
+User: nerdqaxe1 (beliebig)
+Password: x   oder   d=1000
+```
+
+### 2. FCH sammeln sich
+Blöcke gehen auf: `FNBM516c6Erb5Zp5VxyzCG67z5fw3xNHRf`
+
+### 3. Stand prüfen
+- Dashboard: `http://DEINE_LOKALE_IP:5000`
+- Oder per CLI (siehe oben)
+
+### 4. FCH an Börse schicken
+```bash
+freecash-cli sendtoaddress "EINZAHLUNGSADRESSE_DER_BÖRSE" BETRAG
+```
+
+### 5. FCH verkaufen → DOGE
+Auf der Börse:
+1. FCH gegen USDT (oder BTC) verkaufen
+2. USDT/BTC in DOGE tauschen
+3. DOGE auszahlen an: `DUNSBrrro71Yu9j7h7aGd3au9cUwydWuZn`
+
+### 6. TrustWallet → Euro
+Von der TrustWallet aus kannst du DOGE manuell in Euro auszahlen (z. B. über eine Börse oder P2P).
+
+---
+
+## Wo kann man FCH aktuell handeln? (Recherche Aug 2026)
+
+**Ehrliche Lage:**  
+FreeCash (FCH) hat **sehr geringe Liquidität**. Die meisten großen Börsen haben es bereits delistet.
+
+| Börse     | Status                          | Anmerkung                          |
+|-----------|----------------------------------|------------------------------------|
+| **CoinEx**   | 2023 offiziell delistet         | Nicht mehr handelbar              |
+| **XeggeX**   | Scheint noch FCH/USDT zu haben  | Sehr kleine Börse, hohes Risiko   |
+| Binance / KuCoin / Gate / MEXC | Nicht gelistet             | -                                 |
+| Andere    | Meist inaktiv / stale Daten     | Vorsicht vor Fake-Listings        |
+
+**Empfehlung:**
+- Prüfe aktuell auf [CoinLore FCH Exchanges](https://www.coinlore.com/coin/freecash/exchanges) oder dem FreeCash Explorer.
+- Bei sehr kleiner Menge lohnt sich der Verkauf oft kaum (Gebühren + Spread).
+- Alternative: FCH einfach halten oder Peer-to-Peer suchen (Telegram/Community).
 
 ---
 
@@ -43,36 +99,12 @@ Danach gehört die Adresse deinem Node und kann die Coinbase empfangen.
 git clone https://github.com/SyCzOfficialYT/fch-node.git
 cd fch-node
 cp config/config.example.yaml config/config.yaml
-
-# RPC-Zugangsdaten in config.yaml anpassen
+# RPC-Passwort + ggf. andere Werte anpassen
 nano config/config.yaml
-```
 
-Dann starten:
-
-```bash
-# freecashd muss laufen + synchronisiert sein
-docker compose up -d --build
-# oder manuell:
+# starten
 python stratum/server.py   # Terminal 1
 python monitor/app.py      # Terminal 2
 ```
 
-## Miner (NerdQaxe++)
-
-```
-URL:      stratum+tcp://DEINE_LOKALE_IP:3333
-User:     beliebiger_name   (z.B. nerdqaxe1)
-Password: x   oder   d=1000
-```
-
 Dashboard: `http://DEINE_LOKALE_IP:5000`
-
----
-
-## Hinweis zur Umrechnung
-
-Der aktuelle Kurs wird wenn möglich live von CoinGecko geholt.  
-Fallback-Kurs steht in der Config (`fch_to_doge_rate`).
-
-Die echte DOGE-Überweisung musst du vorerst manuell auslösen, sobald das Dashboard „Auszahlung bereit“ anzeigt. Später kann Auto-Payout ergänzt werden.
