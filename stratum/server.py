@@ -122,6 +122,13 @@ def difficulty_to_target(diff: float) -> int:
     return int(max_target / diff)
 
 
+def target_to_difficulty(target: int) -> float:
+    if target <= 0:
+        return float("inf")
+    max_target = 0x00000000FFFF0000000000000000000000000000000000000000000000000000
+    return max_target / target
+
+
 CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 CHARSET_REV = {c: i for i, c in enumerate(CHARSET)}
 CASHADDR_GENERATOR = [0x98F2BC8E61, 0x79B76D99E2, 0xF33E5FB3C4, 0xAE2EABE2A8, 0x1E4F43E470]
@@ -240,12 +247,7 @@ def merkle_root_from_tx_hashes(tx_hashes: List[bytes]) -> bytes:
 
 
 def merkle_branches_for_coinbase(tx_hashes: List[bytes]) -> List[bytes]:
-    """Build Stratum merkle branches for the coinbase at tree index 0.
-
-    tx_hashes contains non-coinbase transaction hashes in internal/little-endian
-    byte order. Stratum miners need the sibling hash at every tree level so they
-    can reconstruct exactly the same merkle root as the pool.
-    """
+    """Build Stratum merkle branches for the coinbase at tree index 0."""
     layer = [b"\x00" * 32] + tx_hashes
     branches: List[bytes] = []
     index = 0
@@ -459,33 +461,63 @@ class StratumClient(threading.Thread):
             return
         share_target = difficulty_to_target(self.difficulty)
         network_target = job.target
+        actual_diff = target_to_difficulty(hash_int) if hash_int else float("inf")
         if hash_int > share_target:
+            log.warning(
+                "Share rejected: job=%s worker=%s nonce=%08x ntime=%08x version=%08x "
+                "diff=%.2f required=%s hash=%064x merkle=%s nbits=%s",
+                job.job_id,
+                self.worker,
+                nonce,
+                ntime,
+                submitted_version,
+                actual_diff,
+                self.difficulty,
+                hash_int,
+                merkle.hex(),
+                job.nbits,
+            )
             self.send({"id": msg_id, "result": False, "error": [23, "Low difficulty", None]})
             return
+        self.shares += 0
         self.send({"id": msg_id, "result": True, "error": None})
+        log.info(
+            "Accepted share: job=%s worker=%s nonce=%08x ntime=%08x version=%08x diff=%.2f/%s",
+            job.job_id,
+            self.worker,
+            nonce,
+            ntime,
+            submitted_version,
+            actual_diff,
+            self.difficulty,
+        )
         if hash_int <= network_target:
             block = job.build_block(coinbase_tx, header)
             block_hex = binascii.hexlify(block).decode()
             result = rpc("submitblock", [block_hex])
             if result is None:
-                log.info(f"BLOCK FOUND by {self.worker} at height {job.height}")
                 self.blocks_found += 1
+                log.info("BLOCK FOUND: height=%s hash=%064x", job.height, hash_int)
             else:
-                log.warning(f"submitblock result: {result}")
+                log.error("submitblock rejected: %s", result)
 
     def run(self):
         with clients_lock:
             connected_clients.append(self)
+        log.info(f"Miner connected from {self.addr}")
+        buffer = b""
         try:
             while self.running:
                 data = self.conn.recv(4096)
                 if not data:
                     break
-                for line in data.decode(errors="ignore").splitlines():
+                buffer += data
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
                     if not line.strip():
                         continue
                     try:
-                        msg = json.loads(line)
+                        msg = json.loads(line.decode())
                         method = msg.get("method")
                         msg_id = msg.get("id")
                         params = msg.get("params", [])
@@ -497,38 +529,47 @@ class StratumClient(threading.Thread):
                             self.handle_submit(msg_id, params)
                         else:
                             self.send({"id": msg_id, "result": None, "error": [20, "Method not supported", None]})
-                    except json.JSONDecodeError:
-                        self.send({"id": None, "result": None, "error": [20, "Invalid JSON", None]})
-        except Exception as e:
-            log.debug(f"Client {self.addr} disconnected: {e}")
+                    except Exception as exc:
+                        log.error(f"Stratum message error: {exc}")
         finally:
+            self.running = False
             with clients_lock:
                 if self in connected_clients:
                     connected_clients.remove(self)
             try:
                 self.conn.close()
-            except Exception:
+            except OSError:
                 pass
+            log.info(f"Miner disconnected from {self.addr}")
 
 
-def start_stratum():
+def main():
+    init_script_pubkey()
+    create_job()
+
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((STRATUM_HOST, STRATUM_PORT))
-    server.listen(8)
+    server.listen(16)
+
+    threading.Thread(target=job_updater, daemon=True).start()
+
     log.info("=" * 60)
     log.info("BCH2 Production Solo Stratum")
     log.info(f"Payout : {PAYOUT_ADDRESS}")
     log.info(f"Listen : {STRATUM_HOST}:{STRATUM_PORT}")
     log.info("=" * 60)
-    init_script_pubkey()
-    threading.Thread(target=job_updater, daemon=True).start()
     log.info("Stratum ready – waiting for NerdQaxe++")
-    while True:
-        conn, addr = server.accept()
-        log.info(f"Miner connected from {addr}")
-        StratumClient(conn, addr).start()
+
+    try:
+        while True:
+            conn, addr = server.accept()
+            StratumClient(conn, addr).start()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.close()
 
 
 if __name__ == "__main__":
-    start_stratum()
+    main()
