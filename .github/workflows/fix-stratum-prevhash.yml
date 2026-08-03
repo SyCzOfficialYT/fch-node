@@ -1,0 +1,35 @@
+name: Fix Stratum prevhash endianness
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fix-stratum-prevhash.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch Stratum prevhash serialization
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('stratum/server.py')
+          text = path.read_text(encoding='utf-8')
+          old = 'def reverse_hex(value: str) -> str:\n    return binascii.hexlify(binascii.unhexlify(value)[::-1]).decode()'
+          new = '''def reverse_hex(value: str) -> str:\n    # ESP-Miner expects the Stratum prevhash with 32-bit words reversed,\n    # not a byte-for-byte reversal. Its BM job construction reverses the\n    # bytes inside each word and then reverses the word order again when\n    # constructing the SHA-256 header. Sending a full byte reversal here\n    # therefore makes the server validate a different header than the ASIC.\n    raw = binascii.unhexlify(value)\n    if len(raw) != 32:\n        raise ValueError("prevhash must be exactly 32 bytes")\n    return binascii.hexlify(b''.join(raw[i:i + 4] for i in range(28, -1, -4))).decode()'''
+          if old not in text:
+              raise SystemExit('Expected reverse_hex implementation not found')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+      - name: Commit fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add stratum/server.py
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix: use NerdQaxe-compatible Stratum prevhash byte order'
+          git push
