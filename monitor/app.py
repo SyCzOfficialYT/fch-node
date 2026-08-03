@@ -1,167 +1,146 @@
 #!/usr/bin/env python3
 """
-fch-node Flask Dashboard – IP-based monitoring for the local solo pool
+BCH2 Solo Mining Dashboard
+Nur über lokale IP erreichbar
 """
 
-import time
-import json
+from flask import Flask, render_template_string, jsonify
 import yaml
+import requests
+from requests.auth import HTTPBasicAuth
 from pathlib import Path
-from flask import Flask, render_template_string, jsonify, request
-from datetime import datetime
+import time
 
 app = Flask(__name__)
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
 if not CONFIG_PATH.exists():
-    CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.example.yaml"
+    CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.example.yaml"
 
-with open(CONFIG_PATH, encoding="utf-8") as f:
-    CONFIG = yaml.safe_load(f)
+with open(CONFIG_PATH) as f:
+    cfg = yaml.safe_load(f)
 
-MODE = CONFIG.get("mode", "solo").upper()
-WALLET = CONFIG["wallet"]["address"]
-LAZY = CONFIG.get("lazy_mining", {})
-FCH_TO_DOGE = float(LAZY.get("fch_to_doge_rate", 0.0015))
-DASH_HOST = CONFIG["dashboard"]["host"]
-DASH_PORT = int(CONFIG["dashboard"]["port"])
+RPC_HOST = cfg["rpc"]["host"]
+RPC_PORT = cfg["rpc"]["port"]
+RPC_USER = cfg["rpc"]["user"]
+RPC_PASS = cfg["rpc"]["password"]
+PAYOUT_ADDRESS = cfg["pool"]["payout_address"]
 
-def load_stats():
-    stats_file = Path(__file__).resolve().parent.parent / "logs" / "stats.json"
-    default = {
-        "mode": MODE,
-        "wallet": WALLET,
-        "hashrate_ths": 0.0,
-        "workers": 0,
-        "valid_shares": 0,
-        "total_shares": 0,
-        "invalid_shares": 0,
-        "blocks_found": 0,
-        "uptime_seconds": 0,
-        "fch_to_doge_rate": FCH_TO_DOGE,
-        "estimated_fch_day": 0.0,
-        "estimated_doge_day": 0.0,
-        "worker_details": {},
-        "last_block_time": None,
-    }
-    if stats_file.exists():
-        try:
-            with open(stats_file, encoding="utf-8") as f:
-                data = json.load(f)
-                default.update(data)
-        except Exception:
-            pass
+def rpc(method, params=None):
+    if params is None:
+        params = []
+    try:
+        r = requests.post(
+            f"http://{RPC_HOST}:{RPC_PORT}",
+            json={"jsonrpc": "1.0", "id": "monitor", "method": method, "params": params},
+            auth=HTTPBasicAuth(RPC_USER, RPC_PASS),
+            timeout=10
+        )
+        data = r.json()
+        return data.get("result")
+    except Exception:
+        return None
 
-    hr = default.get("hashrate_ths", 0) or 0
-    default["estimated_fch_day"] = round(hr * 0.8, 4)
-    default["estimated_doge_day"] = round(default["estimated_fch_day"] * FCH_TO_DOGE, 6)
-    return default
-
-HTML = """
+DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="de">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>fch-node • Solo Pool</title>
-<style>
-:root{--bg:#0b1220;--card:#141c2f;--accent:#38bdf8;--green:#4ade80;--red:#f87171;--muted:#94a3b8;--text:#e2e8f0}
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:1.5rem}
-.header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem;margin-bottom:2rem}
-h1{font-size:1.75rem;background:linear-gradient(90deg,#38bdf8,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.badge{background:var(--card);border:1px solid #334155;padding:.35rem .85rem;border-radius:999px;font-size:.8rem}
-.badge.solo{border-color:var(--green);color:var(--green)}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin-bottom:1.5rem}
-.card{background:var(--card);border:1px solid #334155;border-radius:12px;padding:1.25rem}
-.card h3{font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:.4rem}
-.card .val{font-size:1.6rem;font-weight:700}
-.val.green{color:var(--green)}.val.blue{color:var(--accent)}.val.red{color:var(--red)}
-.sub{font-size:.85rem;color:var(--muted);margin-top:.25rem}
-.section{background:var(--card);border:1px solid #334155;border-radius:12px;padding:1.25rem;margin-bottom:1.5rem}
-.section h2{font-size:1.1rem;color:var(--accent);margin-bottom:.75rem}
-code{background:#0b1220;padding:.6rem 1rem;border-radius:8px;display:inline-block;font-size:1rem}
-.footer{text-align:center;color:var(--muted);font-size:.8rem;margin-top:2rem}
-table{width:100%;border-collapse:collapse;font-size:.9rem}
-th,td{text-align:left;padding:.55rem .4rem;border-bottom:1px solid #334155}
-th{color:var(--muted);font-weight:500}
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BCH2 Solo Node</title>
+    <style>
+        :root { --bg: #0f1115; --card: #1a1d24; --text: #e0e0e0; --accent: #3ecf8e; --muted: #888; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 2rem; }
+        h1 { margin-bottom: 0.5rem; }
+        .subtitle { color: var(--muted); margin-bottom: 2rem; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
+        .card { background: var(--card); border-radius: 12px; padding: 1.25rem; }
+        .card h3 { font-size: 0.85rem; color: var(--muted); margin-bottom: 0.4rem; }
+        .card .value { font-size: 1.6rem; font-weight: 600; color: var(--accent); }
+        .status-ok { color: #3ecf8e; }
+        .status-bad { color: #ff6b6b; }
+        footer { margin-top: 3rem; color: var(--muted); font-size: 0.85rem; }
+    </style>
 </head>
 <body>
-<div class="header">
-  <h1>fch-node Solo Pool</h1>
-  <div>
-    <span class="badge solo">{{ mode }}</span>
-    <span class="badge">IP-only • Local</span>
-  </div>
-</div>
+    <h1>BCH2 Solo Node</h1>
+    <p class="subtitle">Lokales Solo-Mining • Nur du</p>
 
-<div class="grid">
-  <div class="card"><h3>Hashrate</h3><div class="val blue">{{ "%.4f"|format(s.hashrate_ths) }} TH/s</div><div class="sub">NerdQaxe++ ready</div></div>
-  <div class="card"><h3>Valid Shares</h3><div class="val green">{{ s.valid_shares }}</div><div class="sub">Total {{ s.total_shares }} / Invalid {{ s.invalid_shares }}</div></div>
-  <div class="card"><h3>Blocks Found</h3><div class="val">{{ s.blocks_found }}</div><div class="sub">Real SOLO</div></div>
-  <div class="card"><h3>Uptime</h3><div class="val">{{ uptime }}</div><div class="sub">Workers online: {{ s.workers }}</div></div>
-</div>
+    <div class="grid">
+        <div class="card">
+            <h3>Node Status</h3>
+            <div class="value {{ 'status-ok' if synced else 'status-bad' }}">
+                {{ 'Synced' if synced else 'Syncing...' }}
+            </div>
+        </div>
+        <div class="card">
+            <h3>Block Height</h3>
+            <div class="value">{{ height or '–' }}</div>
+        </div>
+        <div class="card">
+            <h3>Difficulty</h3>
+            <div class="value">{{ difficulty or '–' }}</div>
+        </div>
+        <div class="card">
+            <h3>Connections</h3>
+            <div class="value">{{ connections or 0 }}</div>
+        </div>
+        <div class="card">
+            <h3>Wallet Balance</h3>
+            <div class="value">{{ '%.4f'|format(balance) if balance is not none else '–' }} BCH2</div>
+        </div>
+        <div class="card">
+            <h3>Payout Address</h3>
+            <div class="value" style="font-size:0.95rem; word-break:break-all;">{{ payout }}</div>
+        </div>
+    </div>
 
-<div class="grid">
-  <div class="card"><h3>Est. FCH / day</h3><div class="val">{{ "%.4f"|format(s.estimated_fch_day) }}</div><div class="sub">Rough estimate</div></div>
-  <div class="card"><h3>Est. DOGE / day</h3><div class="val green">{{ "%.6f"|format(s.estimated_doge_day) }}</div><div class="sub">1 FCH = {{ s.fch_to_doge_rate }} DOGE</div></div>
-  <div class="card"><h3>Wallet</h3><div class="val" style="font-size:.95rem;word-break:break-all">{{ s.wallet }}</div><div class="sub">Coinbase / default</div></div>
-</div>
+    <footer>
+        Aktualisiert: {{ now }} • Stratum Port 3333 • Dashboard nur lokal
+    </footer>
 
-<div class="section">
-  <h2>Miner Connection (NerdQaxe++)</h2>
-  <p style="color:var(--muted);margin-bottom:.6rem">Stratum URL (local network only):</p>
-  <code>stratum+tcp://{{ ip }}:3333</code>
-  <p style="margin-top:.9rem;color:var(--muted);font-size:.9rem">
-    Username: <strong>your_FCH_address</strong> &nbsp;•&nbsp; Password: <strong>x</strong> or <strong>d=1000</strong>
-  </p>
-</div>
-
-{% if s.worker_details %}
-<div class="section">
-  <h2>Workers</h2>
-  <table>
-    <tr><th>Name</th><th>Valid</th><th>Hashrate</th><th>Diff</th></tr>
-    {% for name, w in s.worker_details.items() %}
-    <tr>
-      <td>{{ name }}</td>
-      <td>{{ w.valid }}</td>
-      <td>{{ w.hashrate_ths }} TH/s</td>
-      <td>{{ w.difficulty }}</td>
-    </tr>
-    {% endfor %}
-  </table>
-</div>
-{% endif %}
-
-<div class="footer">
-  fch-node • Production Solo • {{ now }}
-  <br>Auto-refresh 12s
-</div>
-<script>setTimeout(()=>location.reload(),12000)</script>
+    <script>
+        setTimeout(() => location.reload(), 15000);
+    </script>
 </body>
 </html>
 """
 
 @app.route("/")
 def index():
-    s = load_stats()
-    up = s.get("uptime_seconds", 0)
-    uptime = f"{up//3600}h {(up%3600)//60}m"
-    ip = request.host.split(":")[0]
-    return render_template_string(HTML, s=s, mode=s.get("mode", MODE), uptime=uptime, ip=ip, now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    info = rpc("getblockchaininfo") or {}
+    net = rpc("getnetworkinfo") or {}
+    balance = rpc("getbalance")
+    height = info.get("blocks")
+    difficulty = info.get("difficulty")
+    synced = not info.get("initialblockdownload", True)
+    connections = net.get("connections", 0)
 
-@app.route("/api/stats")
-def api_stats():
-    return jsonify(load_stats())
+    return render_template_string(
+        DASHBOARD_HTML,
+        synced=synced,
+        height=height,
+        difficulty=f"{difficulty:,.0f}" if difficulty else None,
+        connections=connections,
+        balance=balance,
+        payout=PAYOUT_ADDRESS,
+        now=time.strftime("%Y-%m-%d %H:%M:%S")
+    )
 
-@app.route("/api/health")
-def health():
-    return jsonify({"status": "ok", "mode": MODE})
+@app.route("/api/status")
+def api_status():
+    info = rpc("getblockchaininfo") or {}
+    balance = rpc("getbalance")
+    return jsonify({
+        "synced": not info.get("initialblockdownload", True),
+        "height": info.get("blocks"),
+        "difficulty": info.get("difficulty"),
+        "balance": balance,
+        "payout_address": PAYOUT_ADDRESS
+    })
 
 if __name__ == "__main__":
-    Path("logs").mkdir(exist_ok=True)
-    print(f"Dashboard → http://0.0.0.0:{DASH_PORT}")
-    print(f"Open in LAN: http://YOUR_IP:{DASH_PORT}")
-    app.run(host=DASH_HOST, port=DASH_PORT, debug=False)
+    host = cfg.get("monitor", {}).get("host", "0.0.0.0")
+    port = cfg.get("monitor", {}).get("port", 5000)
+    app.run(host=host, port=port, debug=False)

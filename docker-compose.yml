@@ -1,38 +1,40 @@
 version: "3.8"
 
 services:
-  stratum:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    container_name: fch-stratum
-    restart: unless-stopped
-    ports:
-      - "3333:3333"
+  bch2-node:
+    image: ubuntu:22.04
+    container_name: bch2-node
     volumes:
-      - ./config:/app/config
-      - ./logs:/app/logs
-    command: python stratum/server.py
-    networks:
-      - fch-net
+      - ./data:/root/.bitcoincashII
+      - ./bin:/usr/local/bin
+    ports:
+      - "8339:8339"   # P2P
+      - "8342:8342"   # RPC
+    command: >
+      bash -c "
+        bitcoincashIId -daemon &&
+        tail -f /root/.bitcoincashII/debug.log
+      "
+    restart: unless-stopped
 
-  dashboard:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    container_name: fch-dashboard
-    restart: unless-stopped
-    ports:
-      - "5000:5000"
+  stratum:
+    build: ./stratum
+    container_name: bch2-stratum
+    network_mode: host
+    depends_on:
+      - bch2-node
     volumes:
       - ./config:/app/config
-      - ./logs:/app/logs
-    command: python monitor/app.py
+      - ./stratum:/app
+    restart: unless-stopped
+
+  monitor:
+    build: ./monitor
+    container_name: bch2-monitor
+    network_mode: host
     depends_on:
       - stratum
-    networks:
-      - fch-net
-
-networks:
-  fch-net:
-    driver: bridge
+    volumes:
+      - ./config:/app/config
+      - ./monitor:/app
+    restart: unless-stopped

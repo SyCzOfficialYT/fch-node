@@ -1,110 +1,181 @@
-# fch-node – FreeCash Lazy Mining (lokal)
+# bch2-node – Bitcoin Cash II Solo Mining (lokal)
 
-Lokaler Solo/Lazy-Pool für FreeCash mit Wert-Umrechnung in DOGE.
+Echter lokaler Solo-Pool für **Bitcoin Cash II (BCH2)**.
 
-## Konzept
-
-1. NerdQaxe++ minet an deinem lokalen Pool
-2. Gefundene Blöcke landen auf der **Pool-Wallet** (Sammelstelle)
-3. Dashboard zeigt FCH-Stand + ungefähren DOGE-Wert
-4. Ab ca. **5 DOGE** Gegenwert → du verkaufst die FCH und schickst DOGE auf deine TrustWallet
+Dein NerdQaxe++ verbindet sich nur mit **deiner** Node.  
+Niemand anders kann dir den Block wegschnappen.
 
 ---
 
-## Generierte Pool-Wallet (Sammelstelle)
+## Architektur
 
-| Feld | Wert |
-|------|------|
-| **FCH-Adresse** | `FNBM516c6Erb5Zp5VxyzCG67z5fw3xNHRf` |
-| **Private Key (WIF)** | `Kz7wY5wsvHcf1Y2ujkvKEhzxfY7D59KdE7YXUsxJ1QBGWQve53C9` |
+```
+NerdQaxe++  →  lokaler Stratum (Port 3333)  →  bitcoincashIId  →  Blockchain
+                     ↓
+              Flask Dashboard (Port 5000)
+```
 
-### Private Key importieren (einmalig)
+---
+
+## Voraussetzungen
+
+- Linux (Ubuntu/Debian empfohlen)
+- mind. 4 GB RAM, besser 8 GB
+- SSD mit ca. 30–50 GB frei
+- Python 3.10+
+
+---
+
+## 1. Node installieren
 
 ```bash
-freecash-cli importprivkey "Kz7wY5wsvHcf1Y2ujkvKEhzxfY7D59KdE7YXUsxJ1QBGWQve53C9" "pool-wallet" false
-freecash-cli validateaddress "FNBM516c6Erb5Zp5VxyzCG67z5fw3xNHRf"
+# Binary von offizieller Quelle holen
+# https://github.com/BitcoincashII/bitcoincashII-core/releases
+
+# Beispiel (anpassen an aktuelle Version):
+wget https://github.com/BitcoincashII/bitcoincashII-core/releases/download/v27.0.2/bitcoincashII-27.0.2-x86_64-linux-gnu.tar.gz
+tar -xvf bitcoincashII-*.tar.gz
+sudo cp bitcoincashII-*/bin/* /usr/local/bin/
 ```
 
-### Kontostand prüfen
+---
+
+## 2. Node konfigurieren
 
 ```bash
-freecash-cli getbalance
-freecash-cli listunspent 0 9999999 "[\"FNBM516c6Erb5Zp5VxyzCG67z5fw3xNHRf\"]"
+mkdir -p ~/.bitcoincashII
+nano ~/.bitcoincashII/bitcoincashII.conf
 ```
 
----
+Inhalt:
 
-## Deine DOGE Auszahlung
-
-- Adresse (TrustWallet): `DUNSBrrro71Yu9j7h7aGd3au9cUwydWuZn`
-- Ziel: ab ca. **5 DOGE** Gegenwert auszahlen
-
----
-
-## Kompletter Ablauf – Schritt für Schritt
-
-### 1. Mining
-NerdQaxe++ verbindet sich mit:
-```
-stratum+tcp://DEINE_LOKALE_IP:3333
-User: nerdqaxe1 (beliebig)
-Password: x   oder   d=1000
+```ini
+server=1
+daemon=1
+listen=1
+port=8339
+rpcport=8342
+rpcuser=bch2rpc
+rpcpassword=DEIN_SICHERES_PASSWORT_HIER
+rpcallowip=127.0.0.1
+txindex=1
 ```
 
-### 2. FCH sammeln sich
-Blöcke gehen auf: `FNBM516c6Erb5Zp5VxyzCG67z5fw3xNHRf`
+Node starten:
 
-### 3. Stand prüfen
-- Dashboard: `http://DEINE_LOKALE_IP:5000`
-- Oder per CLI (siehe oben)
-
-### 4. FCH an Börse schicken
 ```bash
-freecash-cli sendtoaddress "EINZAHLUNGSADRESSE_DER_BÖRSE" BETRAG
+bitcoincashIId -daemon
 ```
 
-### 5. FCH verkaufen → DOGE
-Auf der Börse:
-1. FCH gegen USDT (oder BTC) verkaufen
-2. USDT/BTC in DOGE tauschen
-3. DOGE auszahlen an: `DUNSBrrro71Yu9j7h7aGd3au9cUwydWuZn`
+Sync-Status prüfen:
 
-### 6. TrustWallet → Euro
-Von der TrustWallet aus kannst du DOGE manuell in Euro auszahlen (z. B. über eine Börse oder P2P).
+```bash
+bitcoincashII-cli getblockchaininfo
+```
 
----
-
-## Wo kann man FCH aktuell handeln? (Recherche Aug 2026)
-
-**Ehrliche Lage:**  
-FreeCash (FCH) hat **sehr geringe Liquidität**. Die meisten großen Börsen haben es bereits delistet.
-
-| Börse     | Status                          | Anmerkung                          |
-|-----------|----------------------------------|------------------------------------|
-| **CoinEx**   | 2023 offiziell delistet         | Nicht mehr handelbar              |
-| **XeggeX**   | Scheint noch FCH/USDT zu haben  | Sehr kleine Börse, hohes Risiko   |
-| Binance / KuCoin / Gate / MEXC | Nicht gelistet             | -                                 |
-| Andere    | Meist inaktiv / stale Daten     | Vorsicht vor Fake-Listings        |
-
-**Empfehlung:**
-- Prüfe aktuell auf [CoinLore FCH Exchanges](https://www.coinlore.com/coin/freecash/exchanges) oder dem FreeCash Explorer.
-- Bei sehr kleiner Menge lohnt sich der Verkauf oft kaum (Gebühren + Spread).
-- Alternative: FCH einfach halten oder Peer-to-Peer suchen (Telegram/Community).
+Warten bis `"initialblockdownload": false`.
 
 ---
 
-## Setup
+## 3. Wallet / Adresse erzeugen
+
+```bash
+bitcoincashII-cli createwallet "mining"
+bitcoincashII-cli getnewaddress
+```
+
+→ Die Adresse beginnt mit `bitcoincashii:q...`  
+Diese Adresse kommt in die Config (siehe unten).
+
+---
+
+## 4. Dieses Repo einrichten
 
 ```bash
 git clone https://github.com/SyCzOfficialYT/fch-node.git
 cd fch-node
-cp config/config.example.yaml config/config.yaml
-# RPC-Passwort + ggf. andere Werte anpassen
-nano config/config.yaml
+git checkout Test
 
-# starten
-python stratum/server.py   # Terminal 1
-python monitor/app.py      # Terminal 2
+cp config/config.example.yaml config/config.yaml
+nano config/config.yaml
 ```
 
-Dashboard: `http://DEINE_LOKALE_IP:5000`
+Wichtige Werte in `config.yaml`:
+
+```yaml
+rpc:
+  host: 127.0.0.1
+  port: 8342
+  user: bch2rpc
+  password: DEIN_SICHERES_PASSWORT_HIER
+
+pool:
+  payout_address: "bitcoincashii:qDEINE_ADRESSE_HIER"
+  stratum_port: 3333
+```
+
+---
+
+## 5. Abhängigkeiten & Start
+
+```bash
+pip install -r requirements.txt
+
+# Terminal 1 – Stratum
+python stratum/server.py
+
+# Terminal 2 – Dashboard
+python monitor/app.py
+```
+
+Dashboard erreichbar unter:
+```
+http://DEINE_LOKALE_IP:5000
+```
+
+---
+
+## 6. NerdQaxe++ verbinden
+
+Im Web-Interface des NerdQaxe:
+
+| Feld     | Wert                                      |
+|----------|-------------------------------------------|
+| URL      | `stratum+tcp://DEINE_LOKALE_IP:3333`     |
+| Username | `bitcoincashii:qDEINE_ADRESSE.nerdq1`    |
+| Password | `x` oder `d=1000`                        |
+
+---
+
+## Wichtige Ports
+
+| Dienst          | Port  |
+|-----------------|-------|
+| BCH2 P2P        | 8339  |
+| BCH2 RPC        | 8342  |
+| Lokaler Stratum | 3333  |
+| Dashboard       | 5000  |
+
+---
+
+## Hinweise
+
+- Echte Solo-Mining: Der Block geht direkt an deine Adresse (Coinbase).
+- Kein Lazy-Mining / keine Umrechnung – du bekommst echte BCH2.
+- Difficulty ist deutlich niedriger als bei BCH → realistische Chance mit NerdQaxe++.
+- Node muss vollständig synchronisiert sein, bevor der Stratum sinnvoll läuft.
+
+---
+
+## Befehle zum Prüfen
+
+```bash
+# Sync-Status
+bitcoincashII-cli getblockchaininfo
+
+# Wallet-Balance
+bitcoincashII-cli getbalance
+
+# Neue Adresse
+bitcoincashII-cli getnewaddress
+```
