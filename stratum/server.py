@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """
-BCH2 Local Solo Stratum Server
-Echter Solo-Mining: Blocks gehen direkt an deine payout_address
+BCH2 Production Solo Stratum Server
+- Echte Coinbase an payout_address
+- Merkle Root Berechnung
+- Block Header Konstruktion
+- submitblock bei gültigem Block
 """
 
 import socket
 import threading
 import json
 import time
+import struct
+import hashlib
 import logging
+import binascii
 import yaml
 from pathlib import Path
+from typing import Optional, List, Tuple
 import requests
 from requests.auth import HTTPBasicAuth
 
-# -------------------------------------------------
-# Config laden
-# -------------------------------------------------
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
 if not CONFIG_PATH.exists():
     CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.example.yaml"
@@ -30,110 +34,249 @@ RPC_USER = cfg["rpc"]["user"]
 RPC_PASS = cfg["rpc"]["password"]
 PAYOUT_ADDRESS = cfg["pool"]["payout_address"]
 STRATUM_HOST = cfg["pool"].get("stratum_host", "0.0.0.0")
-STRATUM_PORT = cfg["pool"].get("stratum_port", 3333)
-START_DIFF = cfg["pool"].get("start_difficulty", 1000)
-JOB_INTERVAL = cfg["pool"].get("job_interval", 30)
+STRATUM_PORT = int(cfg["pool"].get("stratum_port", 3333))
+START_DIFF = int(cfg["pool"].get("start_difficulty", 1000))
+JOB_INTERVAL = int(cfg["pool"].get("job_interval", 25))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("bch2-stratum")
 
-def rpc(method, params=None):
+def rpc(method: str, params=None):
     if params is None:
         params = []
     url = f"http://{RPC_HOST}:{RPC_PORT}"
-    payload = {
-        "jsonrpc": "1.0",
-        "id": "bch2",
-        "method": method,
-        "params": params
-    }
+    payload = {"jsonrpc": "1.0", "id": "stratum", "method": method, "params": params}
     try:
-        r = requests.post(
-            url,
-            json=payload,
-            auth=HTTPBasicAuth(RPC_USER, RPC_PASS),
-            timeout=30
-        )
+        r = requests.post(url, json=payload, auth=HTTPBasicAuth(RPC_USER, RPC_PASS), timeout=60)
         r.raise_for_status()
         data = r.json()
         if data.get("error"):
-            raise Exception(data["error"])
-        return data["result"]
+            log.error(f"RPC {method} error: {data['error']}")
+            return None
+        return data.get("result")
     except Exception as e:
-        log.error(f"RPC error ({method}): {e}")
+        log.error(f"RPC {method} exception: {e}")
         return None
 
-current_job = None
+def sha256d(data: bytes) -> bytes:
+    return hashlib.sha256(hashlib.sha256(data).digest()).digest()
+
+def reverse_hex(h: str) -> str:
+    ba = binascii.unhexlify(h)
+    return binascii.hexlify(ba[::-1]).decode()
+
+def encode_varint(n: int) -> bytes:
+    if n < 0xfd:
+        return struct.pack("<B", n)
+    elif n <= 0xffff:
+        return struct.pack("<BH", 0xfd, n)
+    elif n <= 0xffffffff:
+        return struct.pack("<BI", 0xfe, n)
+    else:
+        return struct.pack("<BQ", 0xff, n)
+
+def bits_to_target(nbits: str) -> int:
+    bits = int(nbits, 16)
+    exponent = bits >> 24
+    mantissa = bits & 0xffffff
+    if exponent <= 3:
+        target = mantissa >> (8 * (3 - exponent))
+    else:
+        target = mantissa << (8 * (exponent - 3))
+    return target
+
+def difficulty_to_target(diff: float) -> int:
+    max_target = 0x00000000FFFF0000000000000000000000000000000000000000000000000000
+    return int(max_target / diff)
+
+CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+def cashaddr_decode(addr: str) -> Tuple[int, bytes]:
+    addr = addr.lower()
+    if ":" in addr:
+        prefix, payload = addr.split(":", 1)
+    else:
+        payload = addr
+    data = []
+    for c in payload:
+        if c not in CHARSET:
+            raise ValueError(f"Invalid CashAddr character: {c}")
+        data.append(CHARSET.index(c))
+    acc = 0
+    bits = 0
+    result = []
+    for v in data:
+        acc = (acc << 5) | v
+        bits += 5
+        while bits >= 8:
+            bits -= 8
+            result.append((acc >> bits) & 0xff)
+    decoded = bytes(result)
+    if len(decoded) < 9:
+        raise ValueError("CashAddr too short")
+    version = decoded[0]
+    hash160 = decoded[1:-8]
+    return version, hash160
+
+def address_to_scriptpubkey(addr: str) -> bytes:
+    version, hash160 = cashaddr_decode(addr)
+    if len(hash160) != 20:
+        raise ValueError("Invalid hash160 length")
+    return b"\x76\xa9\x14" + hash160 + b"\x88\xac"
+
+def serialize_coinbase_tx(height: int, value_sats: int, script_pubkey: bytes, extranonce1: bytes, extranonce2: bytes) -> bytes:
+    if height < 17:
+        height_script = bytes([height])
+    else:
+        h_bytes = b""
+        h = height
+        while h > 0:
+            h_bytes += bytes([h & 0xff])
+            h >>= 8
+        height_script = bytes([len(h_bytes)]) + h_bytes
+    script_sig = height_script + extranonce1 + extranonce2 + b"/BCH2-Solo/"
+    tx = b""
+    tx += struct.pack("<I", 2)
+    tx += b"\x01"
+    tx += b"\x00" * 32
+    tx += struct.pack("<I", 0xffffffff)
+    tx += encode_varint(len(script_sig)) + script_sig
+    tx += struct.pack("<I", 0xffffffff)
+    tx += b"\x01"
+    tx += struct.pack("<Q", value_sats)
+    tx += encode_varint(len(script_pubkey)) + script_pubkey
+    tx += struct.pack("<I", 0)
+    return tx
+
+def merkle_root_from_tx_hashes(tx_hashes: List[bytes]) -> bytes:
+    if not tx_hashes:
+        return b"\x00" * 32
+    layer = tx_hashes[:]
+    while len(layer) > 1:
+        if len(layer) % 2 == 1:
+            layer.append(layer[-1])
+        next_layer = []
+        for i in range(0, len(layer), 2):
+            next_layer.append(sha256d(layer[i] + layer[i + 1]))
+        layer = next_layer
+    return layer[0]
+
+class Job:
+    def __init__(self, template: dict, script_pubkey: bytes):
+        self.template = template
+        self.height = template["height"]
+        self.prevhash = template["previousblockhash"]
+        self.nbits = template["bits"]
+        self.ntime = template["curtime"]
+        self.version = template["version"]
+        self.coinbase_value = template["coinbasevalue"]
+        self.script_pubkey = script_pubkey
+        self.job_id = f"{int(time.time())}_{self.height}"
+        self.target = bits_to_target(self.nbits)
+        self.extranonce1 = struct.pack(">I", int(time.time()) & 0xffffffff)
+        self.tx_hashes = []
+        for tx in template.get("transactions", []):
+            txid = binascii.unhexlify(tx["txid"])[::-1]
+            self.tx_hashes.append(txid)
+
+    def build_coinbase(self, extranonce2: bytes) -> bytes:
+        return serialize_coinbase_tx(self.height, self.coinbase_value, self.script_pubkey, self.extranonce1, extranonce2)
+
+    def build_merkle_root(self, coinbase_tx: bytes) -> bytes:
+        coinbase_hash = sha256d(coinbase_tx)
+        return merkle_root_from_tx_hashes([coinbase_hash] + self.tx_hashes)
+
+    def build_header(self, merkle_root: bytes, ntime: int, nonce: int) -> bytes:
+        header = b""
+        header += struct.pack("<I", self.version)
+        header += binascii.unhexlify(self.prevhash)[::-1]
+        header += merkle_root
+        header += struct.pack("<I", ntime)
+        header += struct.pack("<I", int(self.nbits, 16))
+        header += struct.pack("<I", nonce)
+        return header
+
+    def build_block(self, coinbase_tx: bytes, header: bytes) -> bytes:
+        block = header
+        tx_count = 1 + len(self.template.get("transactions", []))
+        block += encode_varint(tx_count)
+        block += coinbase_tx
+        for tx in self.template.get("transactions", []):
+            block += binascii.unhexlify(tx["data"])
+        return block
+
+current_job: Optional[Job] = None
 job_lock = threading.Lock()
-extranonce1_counter = 0
+script_pubkey: Optional[bytes] = None
+clients_lock = threading.Lock()
+connected_clients = []
 
-def create_job():
-    global current_job, extranonce1_counter
+def init_script_pubkey():
+    global script_pubkey
+    try:
+        script_pubkey = address_to_scriptpubkey(PAYOUT_ADDRESS)
+        log.info(f"Payout scriptPubKey ready for {PAYOUT_ADDRESS}")
+    except Exception as e:
+        log.error(f"Cannot decode payout address: {e}")
+        info = rpc("validateaddress", [PAYOUT_ADDRESS])
+        if info and info.get("isvalid") and info.get("scriptPubKey"):
+            script_pubkey = binascii.unhexlify(info["scriptPubKey"])
+            log.info("Got scriptPubKey via RPC validateaddress")
+        else:
+            raise RuntimeError("Cannot create scriptPubKey for payout address")
 
+def create_job() -> Optional[Job]:
+    global current_job
     tmpl = rpc("getblocktemplate", [{"rules": ["segwit"]}])
     if not tmpl:
+        log.warning("getblocktemplate failed")
         return None
-
-    extranonce1_counter += 1
-    extranonce1 = f"{extranonce1_counter:08x}"
-
-    job = {
-        "job_id": f"{int(time.time())}",
-        "prevhash": tmpl["previousblockhash"],
-        "coinb1": "",
-        "coinb2": "",
-        "merkle_branch": [],
-        "version": hex(tmpl["version"])[2:].zfill(8),
-        "nbits": tmpl["bits"],
-        "ntime": hex(tmpl["curtime"])[2:].zfill(8),
-        "clean_jobs": True,
-        "target": tmpl.get("target"),
-        "height": tmpl["height"],
-        "template": tmpl,
-        "extranonce1": extranonce1,
-    }
-
+    if script_pubkey is None:
+        init_script_pubkey()
+    job = Job(tmpl, script_pubkey)
     with job_lock:
         current_job = job
-
-    log.info(f"New job created – height {job['height']}")
+    log.info(f"New job height={job.height} value={job.coinbase_value/1e8:.8f} BCH2")
     return job
 
 def job_updater():
     while True:
         create_job()
+        with clients_lock:
+            for c in connected_clients:
+                try:
+                    c.send_job()
+                except Exception:
+                    pass
         time.sleep(JOB_INTERVAL)
 
 class StratumClient(threading.Thread):
-    def __init__(self, conn, addr):
+    def __init__(self, conn: socket.socket, addr):
         super().__init__(daemon=True)
         self.conn = conn
         self.addr = addr
-        self.worker = None
+        self.worker = "unknown"
         self.difficulty = START_DIFF
-        self.extranonce1 = None
         self.running = True
+        self.extranonce1 = None
+        self.shares = 0
+        self.blocks_found = 0
 
-    def send(self, msg):
-        data = json.dumps(msg) + "\n"
+    def send(self, obj: dict):
         try:
-            self.conn.sendall(data.encode())
+            self.conn.sendall((json.dumps(obj) + "\n").encode())
         except Exception:
             self.running = False
 
     def handle_subscribe(self, msg_id):
-        global extranonce1_counter
-        extranonce1_counter += 1
-        self.extranonce1 = f"{extranonce1_counter:08x}"
-        result = [[["mining.notify", "ae6812eb4cd7735a"]], self.extranonce1, 4]
+        self.extranonce1 = struct.pack(">I", int(time.time() * 1000) & 0xffffffff)
+        en1_hex = binascii.hexlify(self.extranonce1).decode()
+        result = [[["mining.notify", "bch2solo"], ["mining.set_difficulty", "bch2solo"]], en1_hex, 4]
         self.send({"id": msg_id, "result": result, "error": None})
 
     def handle_authorize(self, msg_id, params):
         self.worker = params[0] if params else "unknown"
-        log.info(f"Worker authorized: {self.worker} from {self.addr}")
+        log.info(f"Authorized {self.worker} from {self.addr}")
         self.send({"id": msg_id, "result": True, "error": None})
         self.send({"id": None, "method": "mining.set_difficulty", "params": [self.difficulty]})
         self.send_job()
@@ -143,25 +286,64 @@ class StratumClient(threading.Thread):
             job = current_job
         if not job:
             return
-        params = [
-            job["job_id"],
-            job["prevhash"],
-            job.get("coinb1", ""),
-            job.get("coinb2", ""),
-            job.get("merkle_branch", []),
-            job["version"],
-            job["nbits"],
-            job["ntime"],
-            job["clean_jobs"]
-        ]
+        prevhash_swab = reverse_hex(job.prevhash)
+        version_hex = f"{job.version:08x}"
+        nbits_hex = job.nbits if len(job.nbits) == 8 else f"{int(job.nbits, 16):08x}"
+        ntime_hex = f"{job.ntime:08x}"
+        coinb1 = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff"
+        coinb2 = "ffffffff01" + "00" * 8 + "00000000"
+        params = [job.job_id, prevhash_swab, coinb1, coinb2, [], version_hex, nbits_hex, ntime_hex, True]
         self.send({"id": None, "method": "mining.notify", "params": params})
 
     def handle_submit(self, msg_id, params):
-        log.info(f"Share submitted from {self.worker}: {params}")
+        if len(params) < 5:
+            self.send({"id": msg_id, "result": False, "error": [20, "Invalid params", None]})
+            return
+        worker, job_id, en2_hex, ntime_hex, nonce_hex = params[:5]
+        self.shares += 1
+        with job_lock:
+            job = current_job
+        if not job or job.job_id != job_id:
+            self.send({"id": msg_id, "result": False, "error": [21, "Stale job", None]})
+            return
+        try:
+            extranonce2 = binascii.unhexlify(en2_hex)
+            ntime = int(ntime_hex, 16)
+            nonce = int(nonce_hex, 16)
+        except Exception:
+            self.send({"id": msg_id, "result": False, "error": [20, "Bad hex", None]})
+            return
+        try:
+            coinbase_tx = job.build_coinbase(extranonce2)
+            merkle = job.build_merkle_root(coinbase_tx)
+            header = job.build_header(merkle, ntime, nonce)
+            header_hash = sha256d(header)
+            hash_int = int.from_bytes(header_hash[::-1], "big")
+        except Exception as e:
+            log.error(f"Build error: {e}")
+            self.send({"id": msg_id, "result": False, "error": [20, "Build failed", None]})
+            return
+        share_target = difficulty_to_target(self.difficulty)
+        network_target = job.target
+        if hash_int > share_target:
+            self.send({"id": msg_id, "result": False, "error": [23, "Low difficulty", None]})
+            return
         self.send({"id": msg_id, "result": True, "error": None})
-        # TODO: Echte Block-Validierung + submitblock wenn Difficulty erreicht
+        log.info(f"Share OK from {self.worker}  hash={header_hash[::-1].hex()[:16]}...")
+        if hash_int <= network_target:
+            log.warning("*** BLOCK CANDIDATE FOUND ***")
+            block = job.build_block(coinbase_tx, header)
+            block_hex = binascii.hexlify(block).decode()
+            result = rpc("submitblock", [block_hex])
+            if result is None or result == "":
+                log.warning("*** BLOCK ACCEPTED BY NETWORK ***")
+                self.blocks_found += 1
+            else:
+                log.error(f"submitblock rejected: {result}")
 
     def run(self):
+        with clients_lock:
+            connected_clients.append(self)
         buffer = ""
         try:
             while self.running:
@@ -178,48 +360,47 @@ class StratumClient(threading.Thread):
                         msg = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-
-                    msg_id = msg.get("id")
+                    mid = msg.get("id")
                     method = msg.get("method")
-                    params = msg.get("params", [])
-
+                    params = msg.get("params") or []
                     if method == "mining.subscribe":
-                        self.handle_subscribe(msg_id)
+                        self.handle_subscribe(mid)
                     elif method == "mining.authorize":
-                        self.handle_authorize(msg_id, params)
+                        self.handle_authorize(mid, params)
                     elif method == "mining.submit":
-                        self.handle_submit(msg_id, params)
+                        self.handle_submit(mid, params)
                     elif method == "mining.extranonce.subscribe":
-                        self.send({"id": msg_id, "result": True, "error": None})
+                        self.send({"id": mid, "result": True, "error": None})
                     else:
-                        self.send({"id": msg_id, "result": None, "error": [20, "Unknown method", None]})
+                        self.send({"id": mid, "result": None, "error": [20, "Unknown method", None]})
         except Exception as e:
-            log.error(f"Client error {self.addr}: {e}")
+            log.error(f"Client {self.addr} error: {e}")
         finally:
+            with clients_lock:
+                if self in connected_clients:
+                    connected_clients.remove(self)
             self.conn.close()
-            log.info(f"Client disconnected: {self.addr}")
+            log.info(f"Disconnected {self.worker} ({self.addr}) shares={self.shares}")
 
 def main():
-    log.info("Starting BCH2 Solo Stratum Server")
-    log.info(f"Payout address: {PAYOUT_ADDRESS}")
-    log.info(f"Listening on {STRATUM_HOST}:{STRATUM_PORT}")
-
+    log.info("=" * 60)
+    log.info("BCH2 Production Solo Stratum")
+    log.info(f"Payout : {PAYOUT_ADDRESS}")
+    log.info(f"Listen : {STRATUM_HOST}:{STRATUM_PORT}")
+    log.info("=" * 60)
+    init_script_pubkey()
     create_job()
-
     t = threading.Thread(target=job_updater, daemon=True)
     t.start()
-
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((STRATUM_HOST, STRATUM_PORT))
-    sock.listen(5)
-    log.info("Stratum server ready – waiting for NerdQaxe++")
-
+    sock.listen(8)
+    log.info("Stratum ready – waiting for NerdQaxe++")
     while True:
         conn, addr = sock.accept()
-        log.info(f"New connection from {addr}")
-        client = StratumClient(conn, addr)
-        client.start()
+        log.info(f"Connection from {addr}")
+        StratumClient(conn, addr).start()
 
 if __name__ == "__main__":
     main()
