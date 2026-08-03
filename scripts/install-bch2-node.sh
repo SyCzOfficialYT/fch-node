@@ -225,20 +225,36 @@ CONF="\$HOME/.bitcoincashII/bitcoincashII.conf"
 REPO="$REPO_ROOT"
 STRATUM_PIDFILE="/tmp/bch2-stratum.pid"
 MONITOR_PIDFILE="/tmp/bch2-monitor.pid"
+
+get_local_ip() {
+    local ip
+    ip=\$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i == "src") {print \$(i+1); exit}}')
+    if [ -z "\$ip" ]; then
+        ip=\$(ip -4 addr show scope global 2>/dev/null | awk '/inet / {sub(/\/.*/, "", \$2); print \$2; exit}')
+    fi
+    printf '%s' "\$ip"
+}
+
 start_stack() {
     echo "Starte BCH2 Node..."; sudo systemctl start "\$SERVICE"; sleep 2
     if [ -f "\$REPO/stratum/server.py" ]; then
         if [ -f "\$STRATUM_PIDFILE" ] && kill -0 \$(cat "\$STRATUM_PIDFILE") 2>/dev/null; then echo "Stratum läuft bereits."; else echo "Starte Stratum..."; cd "\$REPO"; nohup python3 stratum/server.py > /tmp/bch2-stratum.log 2>&1 & echo \$! > "\$STRATUM_PIDFILE"; echo "  Stratum PID \$(cat \$STRATUM_PIDFILE) – Log: /tmp/bch2-stratum.log"; fi
     fi
     if [ -f "\$REPO/monitor/app.py" ]; then
-        if [ -f "\$MONITOR_PIDFILE" ] && kill -0 \$(cat "\$MONITOR_PIDFILE") 2>/dev/null; then echo "Dashboard läuft bereits."; else echo "Starte Dashboard..."; cd "\$REPO"; nohup python3 monitor/app.py > /tmp/bch2-monitor.log 2>&1 & echo \$! > "\$MONITOR_PIDFILE"; echo "  Dashboard PID \$(cat \$MONITOR_PIDFILE) – http://0.0.0.0:5000"; fi
+        if [ -f "\$MONITOR_PIDFILE" ] && kill -0 \$(cat "\$MONITOR_PIDFILE") 2>/dev/null; then echo "Dashboard läuft bereits."; else echo "Starte Dashboard..."; cd "\$REPO"; nohup python3 monitor/app.py > /tmp/bch2-monitor.log 2>&1 & echo \$! > "\$MONITOR_PIDFILE"; fi
+    fi
+    local_ip="\$(get_local_ip)"
+    if [ -n "\$local_ip" ]; then
+        echo "  Dashboard: http://\${local_ip}:5000"
+    else
+        echo "  Dashboard: http://<DEINE-IP>:5000"
     fi
     echo ""; sudo systemctl status "\$SERVICE" --no-pager -l | head -n 12
 }
 stop_stack() { echo "Stoppe Stratum + Dashboard..."; [ -f "\$STRATUM_PIDFILE" ] && kill \$(cat "\$STRATUM_PIDFILE") 2>/dev/null || true; [ -f "\$MONITOR_PIDFILE" ] && kill \$(cat "\$MONITOR_PIDFILE") 2>/dev/null || true; rm -f "\$STRATUM_PIDFILE" "\$MONITOR_PIDFILE"; echo "Stoppe Node..."; sudo systemctl stop "\$SERVICE"; echo "Alles gestoppt."; }
 case "\$1" in
 start) start_stack;; stop) stop_stack;; restart) stop_stack; sleep 1; start_stack;;
-status) sudo systemctl status "\$SERVICE" --no-pager -l | head -n 15; echo ""; if [ -f "\$STRATUM_PIDFILE" ] && kill -0 \$(cat "\$STRATUM_PIDFILE") 2>/dev/null; then echo "Stratum:   läuft (PID \$(cat \$STRATUM_PIDFILE))"; else echo "Stratum:   gestoppt"; fi; if [ -f "\$MONITOR_PIDFILE" ] && kill -0 \$(cat "\$MONITOR_PIDFILE") 2>/dev/null; then echo "Dashboard: läuft (PID \$(cat \$MONITOR_PIDFILE) → http://\$(hostname -I | awk '{print \$1}'):5000"; else echo "Dashboard: gestoppt"; fi; echo ""; if \$CLI -conf="\$CONF" getblockchaininfo > /dev/null 2>&1; then echo "--- Blockchain ---"; \$CLI -conf="\$CONF" getblockchaininfo | grep -E '"chain"|"blocks"|"headers"|"verificationprogress"|"initialblockdownload"|"difficulty"'; else echo "Node antwortet noch nicht auf RPC."; fi;;
+status) sudo systemctl status "\$SERVICE" --no-pager -l | head -n 15; echo ""; if [ -f "\$STRATUM_PIDFILE" ] && kill -0 \$(cat "\$STRATUM_PIDFILE") 2>/dev/null; then echo "Stratum:   läuft (PID \$(cat \$STRATUM_PIDFILE))"; else echo "Stratum:   gestoppt"; fi; if [ -f "\$MONITOR_PIDFILE" ] && kill -0 \$(cat "\$MONITOR_PIDFILE") 2>/dev/null; then local_ip="\$(get_local_ip)"; if [ -n "\$local_ip" ]; then echo "Dashboard: läuft (PID \$(cat \$MONITOR_PIDFILE)) → http://\${local_ip}:5000"; else echo "Dashboard: läuft (PID \$(cat \$MONITOR_PIDFILE)) → http://<DEINE-IP>:5000"; fi; else echo "Dashboard: gestoppt"; fi; echo ""; if \$CLI -conf="\$CONF" getblockchaininfo > /dev/null 2>&1; then echo "--- Blockchain ---"; \$CLI -conf="\$CONF" getblockchaininfo | grep -E '\"chain\"|\"blocks\"|\"headers\"|\"verificationprogress\"|\"initialblockdownload\"|\"difficulty\"'; else echo "Node antwortet noch nicht auf RPC."; fi;;
 sync|info) \$CLI -conf="\$CONF" getblockchaininfo;;
 balance) \$CLI -conf="\$CONF" getbalance;;
 newaddress) \$CLI -conf="\$CONF" getnewaddress;;
@@ -263,12 +279,48 @@ install_python_deps() {
 }
 
 main() {
-    need_sudo; detect_arch
-    echo ""; echo "Installiert wird:"; echo "  • bitcoincashIId + CLI"; echo "  • isolierte BCH2 Runtime (miniupnpc 2.2.2 + libnatpmp 20230423)"; echo "  • systemd Service"; echo "  • bch-node Kommando (startet auch Stratum + Dashboard)"; echo "  • RPC-Passwort → config/config.yaml"; echo ""
-    read -p "Fortfahren? [Y/n] " -n 1 -r; echo
+    need_sudo
+    detect_arch
+
+    echo ""
+    echo "Installiert wird:"
+    echo "  • bitcoincashIId + CLI"
+    echo "  • isolierte BCH2 Runtime (miniupnpc 2.2.2 + libnatpmp 20230423)"
+    echo "  • systemd Service"
+    echo "  • bch-node Kommando (startet auch Stratum + Dashboard)"
+    echo "  • RPC-Passwort → config/config.yaml"
+    echo ""
+    read -p "Fortfahren? [Y/n] " -n 1 -r
+    echo
     if [[ $REPLY =~ ^[Nn]$ ]]; then echo "Abgebrochen."; exit 0; fi
-    install_legacy_runtime; install_binaries; verify_runtime; create_config; write_yaml; create_service; create_cli_wrapper; install_python_deps
-    echo ""; echo -e "${GREEN}════════════════════════════════════════════${NC}"; echo -e "${GREEN}  Installation fertig!${NC}"; echo -e "${GREEN}════════════════════════════════════════════${NC}"; echo ""; echo "Alles steuern mit:"; echo "  bch-node start     ← startet Node + Stratum + Dashboard"; echo "  bch-node status"; echo "  bch-node stop"; echo ""; echo "Dashboard dann unter:  http://DEINE_IP:5000"; echo "Stratum Port:          3333"; echo ""; echo "Zuerst Node syncen lassen:"; echo "  bch-node start"; echo "  bch-node status    # warten bis initialblockdownload = false"; echo ""
+
+    install_legacy_runtime
+    install_binaries
+    verify_runtime
+    create_config
+    write_yaml
+    create_service
+    create_cli_wrapper
+    install_python_deps
+
+    echo ""
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}  Installation fertig!${NC}"
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo ""
+    echo "Alles steuern mit:"
+    echo ""
+    echo "  bch-node start     ← startet Node + Stratum + Dashboard"
+    echo "  bch-node status"
+    echo "  bch-node stop"
+    echo ""
+    echo "Dashboard wird automatisch über die lokale IPv4-Adresse angezeigt."
+    echo "Stratum Port:          3333"
+    echo ""
+    echo "Zuerst Node syncen lassen:"
+    echo "  bch-node start"
+    echo "  bch-node status    # warten bis initialblockdownload = false"
+    echo ""
 }
 
 main
