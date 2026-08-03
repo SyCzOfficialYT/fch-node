@@ -239,6 +239,28 @@ def merkle_root_from_tx_hashes(tx_hashes: List[bytes]) -> bytes:
     return layer[0]
 
 
+def merkle_branches_for_coinbase(tx_hashes: List[bytes]) -> List[bytes]:
+    """Build Stratum merkle branches for the coinbase at tree index 0.
+
+    tx_hashes contains non-coinbase transaction hashes in internal/little-endian
+    byte order. Stratum miners need the sibling hash at every tree level so they
+    can reconstruct exactly the same merkle root as the pool.
+    """
+    layer = [b"\x00" * 32] + tx_hashes
+    branches: List[bytes] = []
+    index = 0
+
+    while len(layer) > 1:
+        if len(layer) % 2:
+            layer.append(layer[-1])
+
+        branches.append(layer[index ^ 1])
+        layer = [sha256d(layer[i] + layer[i + 1]) for i in range(0, len(layer), 2)]
+        index //= 2
+
+    return branches
+
+
 class Job:
     def __init__(self, template: dict, script_pubkey: bytes):
         self.template = template
@@ -330,7 +352,7 @@ def create_job() -> Optional[Job]:
     job = Job(tmpl, script_pubkey)
     with job_lock:
         current_job = job
-    log.info(f"New job height={job.height} value={job.coinbase_value/1e8:.8f} BCH2")
+    log.info(f"New job height={job.height} txs={len(job.tx_hashes)} value={job.coinbase_value/1e8:.8f} BCH2")
     return job
 
 
@@ -386,12 +408,13 @@ class StratumClient(threading.Thread):
         nbits_hex = job.nbits if len(job.nbits) == 8 else f"{int(job.nbits, 16):08x}"
         ntime_hex = f"{job.ntime:08x}"
         coinb1, coinb2 = job.coinbase_parts(self.extranonce1)
+        merkle_branches = [binascii.hexlify(branch).decode() for branch in merkle_branches_for_coinbase(job.tx_hashes)]
         params = [
             job.job_id,
             prevhash_swab,
             binascii.hexlify(coinb1).decode(),
             binascii.hexlify(coinb2).decode(),
-            [],
+            merkle_branches,
             version_hex,
             nbits_hex,
             ntime_hex,
