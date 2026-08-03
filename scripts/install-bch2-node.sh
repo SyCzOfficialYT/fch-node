@@ -96,7 +96,6 @@ install_legacy_runtime() {
     require_command tar
     require_command make
     require_command cc
-    require_command ldconfig
 
     $SUDO mkdir -p "$RUNTIME_DIR"
 
@@ -152,23 +151,30 @@ install_legacy_runtime() {
         echo -e "${GREEN}✓ Private BCH2 Runtime installiert${NC}"
     fi
 
-    # Register only the private BCH2 directory with the dynamic linker.
-    # This makes the legacy SONAMEs available system-wide without replacing
-    # the newer distro-provided miniupnpc library.
-    echo "$RUNTIME_DIR" | $SUDO tee "$LD_CONF_FILE" >/dev/null
+    # BCH2 v27.0.2 needs legacy SONAMEs which may differ from the distro
+    # provided libraries. Keep them isolated and explicitly inject the
+    # runtime path instead of depending on the global ldconfig cache.
     $SUDO chmod 755 "$RUNTIME_DIR"/*.so*
-    $SUDO ldconfig
 
-    if ! $SUDO ldconfig -p | grep -q 'libminiupnpc.so.17'; then
-        echo -e "${RED}✗ libminiupnpc.so.17 wurde vom Dynamic Linker nicht registriert.${NC}"
+    local runtime_ld="${RUNTIME_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    local miniupnpc_resolved natpmp_resolved
+    miniupnpc_resolved="$(LD_LIBRARY_PATH="$runtime_ld" ldd "$INSTALL_DIR/bitcoincashIId" 2>/dev/null | awk '/libminiupnpc\.so\.17/ {print $3; exit}')"
+    natpmp_resolved="$(LD_LIBRARY_PATH="$runtime_ld" ldd "$INSTALL_DIR/bitcoincashIId" 2>/dev/null | awk '/libnatpmp\.so\.1/ {print $3; exit}')"
+
+    if [ "$miniupnpc_resolved" != "$miniupnpc_lib" ]; then
+        echo -e "${RED}✗ libminiupnpc.so.17 konnte nicht aus ${RUNTIME_DIR} aufgelöst werden.${NC}"
+        echo "  Erwartet: $miniupnpc_lib"
+        echo "  Gefunden: ${miniupnpc_resolved:-nicht gefunden}"
         exit 1
     fi
-    if ! $SUDO ldconfig -p | grep -q 'libnatpmp.so.1'; then
-        echo -e "${RED}✗ libnatpmp.so.1 wurde vom Dynamic Linker nicht registriert.${NC}"
+    if [ "$natpmp_resolved" != "$natpmp_lib" ]; then
+        echo -e "${RED}✗ libnatpmp.so.1 konnte nicht aus ${RUNTIME_DIR} aufgelöst werden.${NC}"
+        echo "  Erwartet: $natpmp_lib"
+        echo "  Gefunden: ${natpmp_resolved:-nicht gefunden}"
         exit 1
     fi
 
-    echo -e "${GREEN}✓ BCH2 Runtime im Dynamic Linker registriert${NC}"
+    echo -e "${GREEN}✓ BCH2 Runtime validiert (isoliertes LD_LIBRARY_PATH)${NC}"
 }
 
 install_binaries() {
@@ -205,8 +211,9 @@ verify_runtime() {
     echo ""
     echo -e "${CYAN}→ Prüfe BCH2 Runtime-Abhängigkeiten...${NC}"
 
+    local runtime_ld="${RUNTIME_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     local deps
-    deps="$(ldd "$INSTALL_DIR/bitcoincashIId")"
+    deps="$(LD_LIBRARY_PATH="$runtime_ld" ldd "$INSTALL_DIR/bitcoincashIId")"
 
     if echo "$deps" | grep -q 'libminiupnpc.so.17 => not found'; then
         echo -e "${RED}✗ libminiupnpc.so.17 wird weiterhin nicht gefunden.${NC}"
