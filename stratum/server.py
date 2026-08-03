@@ -1,36 +1,29 @@
 #!/usr/bin/env python3
-"""
-BCH2 Production Solo Stratum Server
-- Echte Coinbase an payout_address
-- Merkle Root Berechnung
-- Block Header Konstruktion
-- submitblock bei gültigem Block
-- RPC credentials are loaded from the BCH2 node config at request time
-"""
+"""BCH2 production solo Stratum server."""
 
-import socket
-import threading
-import json
-import time
-import struct
-import hashlib
-import logging
 import binascii
-import yaml
+import hashlib
+import json
+import logging
+import socket
+import struct
+import threading
+import time
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import List, Optional, Tuple
+
 import requests
+import yaml
 from requests.auth import HTTPBasicAuth
 
 REPO_ROOT = Path(__file__).parent.parent
 CONFIG_PATH = REPO_ROOT / "config" / "config.yaml"
 EXAMPLE_CONFIG_PATH = REPO_ROOT / "config" / "config.example.yaml"
 NODE_CONF_PATH = Path.home() / ".bitcoincashII" / "bitcoincashII.conf"
-
 if not CONFIG_PATH.exists():
     CONFIG_PATH = EXAMPLE_CONFIG_PATH
 
-with open(CONFIG_PATH, encoding="utf-8") as f:
+with CONFIG_PATH.open(encoding="utf-8") as f:
     cfg = yaml.safe_load(f) or {}
 
 RPC_HOST = cfg["rpc"]["host"]
@@ -40,8 +33,11 @@ RPC_PASS = cfg["rpc"]["password"]
 PAYOUT_ADDRESS = cfg["pool"]["payout_address"]
 STRATUM_HOST = cfg["pool"].get("stratum_host", "0.0.0.0")
 STRATUM_PORT = int(cfg["pool"].get("stratum_port", 3333))
-START_DIFF = int(cfg["pool"].get("start_difficulty", 1000))
-JOB_INTERVAL = int(cfg["pool"].get("job_interval", 25))
+START_DIFF = float(cfg["pool"].get("start_difficulty", 1000))
+JOB_INTERVAL = int(cfg["pool"].get("job_interval", 30))
+# BIP310/BIP320 standard version-rolling mask.  NerdQaxe++ uses this
+# extension and sends the rolled bits as the sixth mining.submit parameter.
+VERSION_ROLLING_MASK = 0x1FFFE000
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("bch2-stratum")
@@ -77,15 +73,20 @@ def rpc(method: str, params=None):
     url = f"http://{RPC_HOST}:{RPC_PORT}"
     payload = {"jsonrpc": "1.0", "id": "stratum", "method": method, "params": params}
     try:
-        r = requests.post(url, json=payload, auth=HTTPBasicAuth(rpc_user, rpc_pass), timeout=60)
-        r.raise_for_status()
-        data = r.json()
+        response = requests.post(
+            url,
+            json=payload,
+            auth=HTTPBasicAuth(rpc_user, rpc_pass),
+            timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()
         if data.get("error"):
-            log.error(f"RPC {method} error: {data['error']}")
+            log.error("RPC %s error: %s", method, data["error"])
             return None
         return data.get("result")
-    except Exception as e:
-        log.error(f"RPC {method} exception: {e}")
+    except Exception as exc:
+        log.error("RPC %s exception: %s", method, exc)
         return None
 
 
@@ -93,31 +94,31 @@ def sha256d(data: bytes) -> bytes:
     return hashlib.sha256(hashlib.sha256(data).digest()).digest()
 
 
-def reverse_hex(h: str) -> str:
-    ba = binascii.unhexlify(h)
-    return binascii.hexlify(ba[::-1]).decode()
+def reverse_hex(value: str) -> str:
+    return binascii.hexlify(binascii.unhexlify(value)[::-1]).decode()
 
 
 def encode_varint(n: int) -> bytes:
-    if n < 0xfd:
+    if n < 0xFD:
         return struct.pack("<B", n)
-    if n <= 0xffff:
-        return struct.pack("<BH", 0xfd, n)
-    if n <= 0xffffffff:
-        return struct.pack("<BI", 0xfe, n)
-    return struct.pack("<BQ", 0xff, n)
+    if n <= 0xFFFF:
+        return struct.pack("<BH", 0xFD, n)
+    if n <= 0xFFFFFFFF:
+        return struct.pack("<BI", 0xFE, n)
+    return struct.pack("<BQ", 0xFF, n)
 
 
 def bits_to_target(nbits: str) -> int:
-    bits = int(nbits, 16)
-    exponent = bits >> 24
-    mantissa = bits & 0xffffff
+    compact = int(nbits, 16)
+    exponent = compact >> 24
+    mantissa = compact & 0xFFFFFF
     if exponent <= 3:
         return mantissa >> (8 * (3 - exponent))
     return mantissa << (8 * (exponent - 3))
 
 
 def difficulty_to_target(diff: float) -> int:
+    # Stratum SHA-256 difficulty-1 target, as used by standard SHA-256 ASICs.
     max_target = 0x00000000FFFF0000000000000000000000000000000000000000000000000000
     return int(max_target / diff)
 
@@ -131,7 +132,13 @@ def target_to_difficulty(target: int) -> float:
 
 CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 CHARSET_REV = {c: i for i, c in enumerate(CHARSET)}
-CASHADDR_GENERATOR = [0x98F2BC8E61, 0x79B76D99E2, 0xF33E5FB3C4, 0xAE2EABE2A8, 0x1E4F43E470]
+CASHADDR_GENERATOR = [
+    0x98F2BC8E61,
+    0x79B76D99E2,
+    0xF33E5FB3C4,
+    0xAE2EABE2A8,
+    0x1E4F43E470,
+]
 
 
 def _cashaddr_prefix_expand(prefix: str) -> List[int]:
@@ -139,14 +146,14 @@ def _cashaddr_prefix_expand(prefix: str) -> List[int]:
 
 
 def _cashaddr_polymod(values: List[int]) -> int:
-    chk = 1
+    checksum = 1
     for value in values:
-        top = chk >> 35
-        chk = ((chk & 0x07FFFFFFFF) << 5) ^ value
+        top = checksum >> 35
+        checksum = ((checksum & 0x07FFFFFFFF) << 5) ^ value
         for i, generator in enumerate(CASHADDR_GENERATOR):
             if (top >> i) & 1:
-                chk ^= generator
-    return chk
+                checksum ^= generator
+    return checksum
 
 
 def _convertbits(data: List[int], frombits: int, tobits: int, pad: bool) -> List[int]:
@@ -217,19 +224,25 @@ def address_to_scriptpubkey(addr: str) -> bytes:
     raise ValueError(f"Unsupported CashAddr version: {version}")
 
 
-def serialize_coinbase_tx(height: int, value_sats: int, script_pubkey: bytes, extranonce1: bytes, extranonce2: bytes) -> bytes:
+def serialize_coinbase_tx(
+    height: int,
+    value_sats: int,
+    script_pubkey: bytes,
+    extranonce1: bytes,
+    extranonce2: bytes,
+) -> bytes:
     h_bytes = b""
     h = height
     while h > 0:
-        h_bytes += bytes([h & 0xff])
+        h_bytes += bytes([h & 0xFF])
         h >>= 8
     height_script = bytes([len(h_bytes)]) + h_bytes
     script_sig = height_script + extranonce1 + extranonce2 + b"/BCH2-Solo/"
     if not 2 <= len(script_sig) <= 100:
         raise ValueError(f"Coinbase scriptSig length {len(script_sig)} outside 2..100")
     tx = struct.pack("<I", 2)
-    tx += b"\x01" + b"\x00" * 32 + struct.pack("<I", 0xffffffff)
-    tx += encode_varint(len(script_sig)) + script_sig + struct.pack("<I", 0xffffffff)
+    tx += b"\x01" + b"\x00" * 32 + struct.pack("<I", 0xFFFFFFFF)
+    tx += encode_varint(len(script_sig)) + script_sig + struct.pack("<I", 0xFFFFFFFF)
     tx += b"\x01" + struct.pack("<Q", value_sats)
     tx += encode_varint(len(script_pubkey)) + script_pubkey + struct.pack("<I", 0)
     return tx
@@ -247,19 +260,15 @@ def merkle_root_from_tx_hashes(tx_hashes: List[bytes]) -> bytes:
 
 
 def merkle_branches_for_coinbase(tx_hashes: List[bytes]) -> List[bytes]:
-    """Build Stratum merkle branches for the coinbase at tree index 0."""
     layer = [b"\x00" * 32] + tx_hashes
     branches: List[bytes] = []
     index = 0
-
     while len(layer) > 1:
         if len(layer) % 2:
             layer.append(layer[-1])
-
         branches.append(layer[index ^ 1])
         layer = [sha256d(layer[i] + layer[i + 1]) for i in range(0, len(layer), 2)]
         index //= 2
-
     return branches
 
 
@@ -270,7 +279,7 @@ class Job:
         self.prevhash = template["previousblockhash"]
         self.nbits = template["bits"]
         self.ntime = template["curtime"]
-        self.version = template["version"]
+        self.version = int(template["version"]) & 0xFFFFFFFF
         self.coinbase_value = template["coinbasevalue"]
         self.script_pubkey = script_pubkey
         self.job_id = f"{int(time.time())}_{self.height}"
@@ -278,22 +287,28 @@ class Job:
         self.tx_hashes = [binascii.unhexlify(tx["txid"])[::-1] for tx in template.get("transactions", [])]
 
     def build_coinbase(self, extranonce1: bytes, extranonce2: bytes) -> bytes:
-        return serialize_coinbase_tx(self.height, self.coinbase_value, self.script_pubkey, extranonce1, extranonce2)
+        return serialize_coinbase_tx(
+            self.height,
+            self.coinbase_value,
+            self.script_pubkey,
+            extranonce1,
+            extranonce2,
+        )
 
     def coinbase_parts(self, extranonce1: bytes) -> Tuple[bytes, bytes]:
         h = self.height
         h_bytes = b""
         while h > 0:
-            h_bytes += bytes([h & 0xff])
+            h_bytes += bytes([h & 0xFF])
             h >>= 8
         height_script = bytes([len(h_bytes)]) + h_bytes
         script_sig = height_script + extranonce1 + (b"\x00" * 4) + b"/BCH2-Solo/"
         if not 2 <= len(script_sig) <= 100:
             raise ValueError(f"Coinbase scriptSig length {len(script_sig)} outside 2..100")
         prefix = struct.pack("<I", 2)
-        prefix += b"\x01" + b"\x00" * 32 + struct.pack("<I", 0xffffffff)
+        prefix += b"\x01" + b"\x00" * 32 + struct.pack("<I", 0xFFFFFFFF)
         prefix += encode_varint(len(script_sig)) + height_script + extranonce1
-        suffix = b"\x00" * 4 + b"/BCH2-Solo/" + struct.pack("<I", 0xffffffff)
+        suffix = b"\x00" * 4 + b"/BCH2-Solo/" + struct.pack("<I", 0xFFFFFFFF)
         suffix += b"\x01" + struct.pack("<Q", self.coinbase_value)
         suffix += encode_varint(len(self.script_pubkey)) + self.script_pubkey + struct.pack("<I", 0)
         return prefix, suffix
@@ -301,15 +316,21 @@ class Job:
     def build_merkle_root(self, coinbase_tx: bytes) -> bytes:
         return merkle_root_from_tx_hashes([sha256d(coinbase_tx)] + self.tx_hashes)
 
-    def build_header(self, merkle_root: bytes, ntime: int, nonce: int, version: Optional[int] = None) -> bytes:
+    def build_header(
+        self,
+        merkle_root: bytes,
+        ntime: int,
+        nonce: int,
+        version: Optional[int] = None,
+    ) -> bytes:
         header_version = self.version if version is None else version
         return (
-            struct.pack("<I", header_version)
+            struct.pack("<I", header_version & 0xFFFFFFFF)
             + binascii.unhexlify(self.prevhash)[::-1]
             + merkle_root
-            + struct.pack("<I", ntime)
-            + struct.pack("<I", int(self.nbits, 16))
-            + struct.pack("<I", nonce)
+            + struct.pack("<I", ntime & 0xFFFFFFFF)
+            + struct.pack("<I", int(self.nbits, 16) & 0xFFFFFFFF)
+            + struct.pack("<I", nonce & 0xFFFFFFFF)
         )
 
     def build_block(self, coinbase_tx: bytes, header: bytes) -> bytes:
@@ -332,9 +353,9 @@ def init_script_pubkey():
     global script_pubkey
     try:
         script_pubkey = address_to_scriptpubkey(PAYOUT_ADDRESS)
-        log.info(f"Payout scriptPubKey ready for {PAYOUT_ADDRESS}")
-    except Exception as e:
-        log.error(f"Cannot decode payout address: {e}")
+        log.info("Payout scriptPubKey ready for %s", PAYOUT_ADDRESS)
+    except Exception as exc:
+        log.warning("Local CashAddr decode failed: %s; asking node", exc)
         info = rpc("validateaddress", [PAYOUT_ADDRESS])
         if info and info.get("isvalid") and info.get("scriptPubKey"):
             script_pubkey = binascii.unhexlify(info["scriptPubKey"])
@@ -345,7 +366,9 @@ def init_script_pubkey():
 
 def create_job() -> Optional[Job]:
     global current_job
-    tmpl = rpc("getblocktemplate", [{"rules": ["segwit"]}])
+    # BCH2 disables SegWit post-fork; request the generic template without
+    # advertising a SegWit rule that this chain does not use.
+    tmpl = rpc("getblocktemplate", [{"rules": []}])
     if not tmpl:
         log.warning("getblocktemplate failed")
         return None
@@ -354,7 +377,14 @@ def create_job() -> Optional[Job]:
     job = Job(tmpl, script_pubkey)
     with job_lock:
         current_job = job
-    log.info(f"New job height={job.height} txs={len(job.tx_hashes)} value={job.coinbase_value/1e8:.8f} BCH2")
+    log.info(
+        "New job height=%s txs=%s value=%.8f BCH2 bits=%s version=%08x",
+        job.height,
+        len(job.tx_hashes),
+        job.coinbase_value / 1e8,
+        job.nbits,
+        job.version,
+    )
     return job
 
 
@@ -362,9 +392,9 @@ def job_updater():
     while True:
         create_job()
         with clients_lock:
-            for c in connected_clients:
+            for client in list(connected_clients):
                 try:
-                    c.send_job()
+                    client.send_job()
                 except Exception:
                     pass
         time.sleep(JOB_INTERVAL)
@@ -378,24 +408,73 @@ class StratumClient(threading.Thread):
         self.worker = "unknown"
         self.difficulty = START_DIFF
         self.running = True
-        self.extranonce1 = None
+        self.extranonce1: Optional[bytes] = None
         self.shares = 0
         self.blocks_found = 0
+        self.version_rolling_enabled = False
+        self.version_mask = VERSION_ROLLING_MASK
 
     def send(self, obj: dict):
         try:
-            self.conn.sendall((json.dumps(obj) + "\n").encode())
-        except Exception:
+            self.conn.sendall((json.dumps(obj, separators=(",", ":")) + "\n").encode())
+        except OSError:
             self.running = False
 
+    def handle_configure(self, msg_id, params):
+        extensions = params[0] if params and isinstance(params[0], list) else []
+        extension_params = params[1] if len(params) > 1 and isinstance(params[1], dict) else {}
+        requested_mask = extension_params.get("version-rolling.mask", "ffffffff")
+        try:
+            miner_mask = int(str(requested_mask), 16) & 0xFFFFFFFF
+        except (TypeError, ValueError):
+            miner_mask = 0
+        negotiated = VERSION_ROLLING_MASK & miner_mask
+        self.version_mask = negotiated
+        self.version_rolling_enabled = "version-rolling" in extensions and negotiated != 0
+        result = {}
+        if "version-rolling" in extensions:
+            result["version-rolling"] = self.version_rolling_enabled
+            result["version-rolling.mask"] = f"{self.version_mask:08x}"
+        self.send({"id": msg_id, "result": result, "error": None})
+        if self.version_rolling_enabled:
+            self.send({"id": None, "method": "mining.set_version_mask", "params": [f"{self.version_mask:08x}"]})
+        log.info(
+            "Version rolling %s for %s mask=%08x miner_mask=%08x",
+            "enabled" if self.version_rolling_enabled else "disabled",
+            self.addr,
+            self.version_mask,
+            miner_mask,
+        )
+
+    def handle_set_version_mask(self, msg_id, params):
+        if not params:
+            self.send({"id": msg_id, "result": False, "error": [20, "Missing version mask", None]})
+            return
+        try:
+            requested = int(str(params[0]), 16) & 0xFFFFFFFF
+        except (TypeError, ValueError):
+            self.send({"id": msg_id, "result": False, "error": [20, "Invalid version mask", None]})
+            return
+        self.version_mask &= requested
+        self.version_rolling_enabled = self.version_mask != 0
+        self.send({"id": msg_id, "result": True, "error": None})
+
     def handle_subscribe(self, msg_id):
-        self.extranonce1 = struct.pack(">I", int(time.time() * 1000) & 0xffffffff)
+        self.extranonce1 = struct.pack(">I", int(time.time() * 1000) & 0xFFFFFFFF)
         en1_hex = binascii.hexlify(self.extranonce1).decode()
-        self.send({"id": msg_id, "result": [[["mining.notify", "bch2solo"], ["mining.set_difficulty", "bch2solo"]], en1_hex, 4], "error": None})
+        self.send({
+            "id": msg_id,
+            "result": [
+                [["mining.notify", "bch2solo"], ["mining.set_difficulty", "bch2solo"]],
+                en1_hex,
+                4,
+            ],
+            "error": None,
+        })
 
     def handle_authorize(self, msg_id, params):
         self.worker = params[0] if params else "unknown"
-        log.info(f"Authorized {self.worker} from {self.addr}")
+        log.info("Authorized %s from %s", self.worker, self.addr)
         self.send({"id": msg_id, "result": True, "error": None})
         self.send({"id": None, "method": "mining.set_difficulty", "params": [self.difficulty]})
         self.send_job()
@@ -405,32 +484,41 @@ class StratumClient(threading.Thread):
             job = current_job
         if not job or self.extranonce1 is None:
             return
-        prevhash_swab = reverse_hex(job.prevhash)
-        version_hex = f"{job.version:08x}"
-        nbits_hex = job.nbits if len(job.nbits) == 8 else f"{int(job.nbits, 16):08x}"
-        ntime_hex = f"{job.ntime:08x}"
-        coinb1, coinb2 = job.coinbase_parts(self.extranonce1)
-        merkle_branches = [binascii.hexlify(branch).decode() for branch in merkle_branches_for_coinbase(job.tx_hashes)]
         params = [
             job.job_id,
-            prevhash_swab,
-            binascii.hexlify(coinb1).decode(),
-            binascii.hexlify(coinb2).decode(),
-            merkle_branches,
-            version_hex,
-            nbits_hex,
-            ntime_hex,
+            reverse_hex(job.prevhash),
+            binascii.hexlify(job.coinbase_parts(self.extranonce1)[0]).decode(),
+            binascii.hexlify(job.coinbase_parts(self.extranonce1)[1]).decode(),
+            [binascii.hexlify(branch).decode() for branch in merkle_branches_for_coinbase(job.tx_hashes)],
+            f"{job.version:08x}",
+            job.nbits if len(job.nbits) == 8 else f"{int(job.nbits, 16):08x}",
+            f"{job.ntime:08x}",
             True,
         ]
         self.send({"id": None, "method": "mining.notify", "params": params})
+
+    def _effective_version(self, job: Job, version_bits: Optional[int]) -> int:
+        if version_bits is None:
+            return job.version
+        if not self.version_rolling_enabled:
+            # Some NerdQaxe/ESP-Miner versions can send the version bits even
+            # when mining.configure was omitted. Treat the field as BIP310
+            # version bits only when it fits the standard rolling mask.
+            if version_bits & ~VERSION_ROLLING_MASK:
+                raise ValueError("Version rolling is not enabled")
+            mask = VERSION_ROLLING_MASK
+        else:
+            mask = self.version_mask
+        if version_bits & ~mask:
+            raise ValueError("Version bits outside negotiated mask")
+        return ((job.version & ~mask) | (version_bits & mask)) & 0xFFFFFFFF
 
     def handle_submit(self, msg_id, params):
         if len(params) < 5:
             self.send({"id": msg_id, "result": False, "error": [20, "Invalid params", None]})
             return
         worker, job_id, en2_hex, ntime_hex, nonce_hex = params[:5]
-        version_hex = params[5] if len(params) >= 6 else None
-        self.shares += 1
+        version_bits_hex = params[5] if len(params) >= 6 else None
         with job_lock:
             job = current_job
         if not job or job.job_id != job_id:
@@ -442,12 +530,13 @@ class StratumClient(threading.Thread):
                 raise ValueError("extranonce2 must be 4 bytes")
             ntime = int(ntime_hex, 16)
             nonce = int(nonce_hex, 16)
-            submitted_version = int(version_hex, 16) if version_hex is not None else job.version
-        except Exception:
-            self.send({"id": msg_id, "result": False, "error": [20, "Bad hex", None]})
-            return
-        if submitted_version & ~0xFFFFFFFF:
-            self.send({"id": msg_id, "result": False, "error": [20, "Invalid version", None]})
+            version_bits = int(version_bits_hex, 16) if version_bits_hex is not None else None
+            if version_bits is not None and version_bits > 0xFFFFFFFF:
+                raise ValueError("version bits out of range")
+            submitted_version = self._effective_version(job, version_bits)
+        except ValueError as exc:
+            log.warning("Invalid share submission from %s: %s", self.worker, exc)
+            self.send({"id": msg_id, "result": False, "error": [20, str(exc), None]})
             return
         try:
             coinbase_tx = job.build_coinbase(self.extranonce1, extranonce2)
@@ -455,21 +544,24 @@ class StratumClient(threading.Thread):
             header = job.build_header(merkle, ntime, nonce, submitted_version)
             header_hash = sha256d(header)
             hash_int = int.from_bytes(header_hash[::-1], "big")
-        except Exception as e:
-            log.error(f"Build error: {e}")
+        except Exception as exc:
+            log.error("Build error: %s", exc)
             self.send({"id": msg_id, "result": False, "error": [20, "Build failed", None]})
             return
+
         share_target = difficulty_to_target(self.difficulty)
         network_target = job.target
-        actual_diff = target_to_difficulty(hash_int) if hash_int else float("inf")
+        actual_diff = target_to_difficulty(hash_int)
         if hash_int > share_target:
             log.warning(
-                "Share rejected: job=%s worker=%s nonce=%08x ntime=%08x version=%08x "
-                "diff=%.2f required=%s hash=%064x merkle=%s nbits=%s",
+                "Share rejected: job=%s worker=%s nonce=%08x ntime=%08x "
+                "version_bits=%s version=%08x diff=%.2f required=%s "
+                "hash=%064x merkle=%s nbits=%s",
                 job.job_id,
                 self.worker,
                 nonce,
                 ntime,
+                version_bits_hex or "none",
                 submitted_version,
                 actual_diff,
                 self.difficulty,
@@ -479,22 +571,25 @@ class StratumClient(threading.Thread):
             )
             self.send({"id": msg_id, "result": False, "error": [23, "Low difficulty", None]})
             return
-        self.shares += 0
+
+        self.shares += 1
         self.send({"id": msg_id, "result": True, "error": None})
         log.info(
-            "Accepted share: job=%s worker=%s nonce=%08x ntime=%08x version=%08x diff=%.2f/%s",
+            "Accepted share: job=%s worker=%s nonce=%08x ntime=%08x "
+            "version_bits=%s version=%08x diff=%.2f/%s",
             job.job_id,
             self.worker,
             nonce,
             ntime,
+            version_bits_hex or "none",
             submitted_version,
             actual_diff,
             self.difficulty,
         )
+
         if hash_int <= network_target:
             block = job.build_block(coinbase_tx, header)
-            block_hex = binascii.hexlify(block).decode()
-            result = rpc("submitblock", [block_hex])
+            result = rpc("submitblock", [binascii.hexlify(block).decode()])
             if result is None:
                 self.blocks_found += 1
                 log.info("BLOCK FOUND: height=%s hash=%064x", job.height, hash_int)
@@ -504,7 +599,7 @@ class StratumClient(threading.Thread):
     def run(self):
         with clients_lock:
             connected_clients.append(self)
-        log.info(f"Miner connected from {self.addr}")
+        log.info("Miner connected from %s", self.addr)
         buffer = b""
         try:
             while self.running:
@@ -521,7 +616,11 @@ class StratumClient(threading.Thread):
                         method = msg.get("method")
                         msg_id = msg.get("id")
                         params = msg.get("params", [])
-                        if method == "mining.subscribe":
+                        if method == "mining.configure":
+                            self.handle_configure(msg_id, params)
+                        elif method == "mining.set_version_mask":
+                            self.handle_set_version_mask(msg_id, params)
+                        elif method == "mining.subscribe":
                             self.handle_subscribe(msg_id)
                         elif method == "mining.authorize":
                             self.handle_authorize(msg_id, params)
@@ -530,7 +629,7 @@ class StratumClient(threading.Thread):
                         else:
                             self.send({"id": msg_id, "result": None, "error": [20, "Method not supported", None]})
                     except Exception as exc:
-                        log.error(f"Stratum message error: {exc}")
+                        log.error("Stratum message error: %s", exc)
         finally:
             self.running = False
             with clients_lock:
@@ -540,7 +639,7 @@ class StratumClient(threading.Thread):
                 self.conn.close()
             except OSError:
                 pass
-            log.info(f"Miner disconnected from {self.addr}")
+            log.info("Miner disconnected from %s", self.addr)
 
 
 def main():
@@ -551,13 +650,13 @@ def main():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((STRATUM_HOST, STRATUM_PORT))
     server.listen(16)
-
     threading.Thread(target=job_updater, daemon=True).start()
 
     log.info("=" * 60)
     log.info("BCH2 Production Solo Stratum")
-    log.info(f"Payout : {PAYOUT_ADDRESS}")
-    log.info(f"Listen : {STRATUM_HOST}:{STRATUM_PORT}")
+    log.info("Payout : %s", PAYOUT_ADDRESS)
+    log.info("Listen : %s:%s", STRATUM_HOST, STRATUM_PORT)
+    log.info("Version rolling mask: %08x", VERSION_ROLLING_MASK)
     log.info("=" * 60)
     log.info("Stratum ready – waiting for NerdQaxe++")
 
