@@ -15,7 +15,7 @@ if ! bitcoincashII-cli getblockchaininfo > /dev/null 2>&1; then
 fi
 
 echo "Starte Stratum Server..."
-python3 stratum/server.py &
+python3 -c 'from stratum import server; from stratum.asic_compat import patch; patch(server); server.main()' &
 STRATUM_PID=$!
 
 echo "Starte Dashboard..."
