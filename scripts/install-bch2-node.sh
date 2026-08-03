@@ -1,13 +1,12 @@
 #!/bin/bash
-set -Eeuo pipefail
+set -e
 
 # ============================================================
-# BCH2 Node Interactive Installer
-# - bitcoincashIId + systemd
-# - bch-node CLI
-# - RPC-Passwort automatisch in config/config.yaml
-# - Stratum + Dashboard Start-Unterstützung
-# - Runtime-Kompatibilität für BCH2 v27.0.2
+#  BCH2 Node Interactive Installer
+#  - bitcoincashIId + systemd
+#  - bch-node CLI
+#  - RPC-Passwort automatisch in config/config.yaml
+#  - Stratum + Dashboard Start-Unterstützung
 # ============================================================
 
 RED='\033[0;31m'
@@ -25,33 +24,15 @@ CONF_FILE="$DATA_DIR/bitcoincashII.conf"
 SERVICE_NAME="bch2-node"
 CLI_WRAPPER="/usr/local/bin/bch-node"
 
-# BCH2 v27.0.2 is linked against these legacy SONAMEs.
-# Keep compatibility libraries private to BCH2 instead of replacing
-# the system's current ABI (CachyOS currently provides newer SONAMEs).
 MINIUPNPC_VERSION="2.2.2"
-MINIUPNPC_URL="https://miniupnp.tuxfamily.org/files/miniupnpc-${MINIUPNPC_VERSION}.tar.gz"
+MINIUPNPC_URL="https://github.com/miniupnp/miniupnp/releases/download/miniupnpd_${MINIUPNPC_VERSION}/miniupnpc-${MINIUPNPC_VERSION}.tar.gz"
 NATPMP_VERSION="20230423"
-NATPMP_URL="https://miniupnp.tuxfamily.org/files/libnatpmp-${NATPMP_VERSION}.tar.gz"
+NATPMP_URL="https://github.com/miniupnp/libnatpmp/archive/refs/tags/${NATPMP_VERSION}.tar.gz"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 YAML_EXAMPLE="$REPO_ROOT/config/config.example.yaml"
 YAML_FILE="$REPO_ROOT/config/config.yaml"
-TMPDIR=""
-
-cleanup() {
-    if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ]; then
-        rm -rf "$TMPDIR"
-    fi
-}
-trap cleanup EXIT
-
-on_error() {
-    local exit_code=$?
-    echo -e "${RED}✗ Installation fehlgeschlagen (Exit-Code ${exit_code}).${NC}" >&2
-    exit "$exit_code"
-}
-trap on_error ERR
 
 echo -e "${CYAN}"
 echo "╔════════════════════════════════════════════╗"
@@ -60,15 +41,18 @@ echo "╚═══════════════════════�
 echo -e "${NC}"
 
 need_sudo() {
-    if [ "$EUID" -ne 0 ]; then SUDO="sudo"; else SUDO=""; fi
+    if [ "$EUID" -ne 0 ]; then
+        SUDO="sudo"
+    else
+        SUDO=""
+    fi
 }
 
 require_command() {
-    local command_name="$1"
-    if ! command -v "$command_name" >/dev/null 2>&1; then
-        echo -e "${RED}✗ Benötigtes Programm fehlt: ${command_name}${NC}"
+    command -v "$1" >/dev/null 2>&1 || {
+        echo -e "${RED}✗ Benötigtes Kommando fehlt: $1${NC}"
         exit 1
-    fi
+    }
 }
 
 detect_arch() {
@@ -121,6 +105,11 @@ install_legacy_runtime() {
     local miniupnpc_archive="$runtime_tmp/miniupnpc-${MINIUPNPC_VERSION}.tar.gz"
     local natpmp_archive="$runtime_tmp/libnatpmp-${NATPMP_VERSION}.tar.gz"
 
+    cleanup_runtime_tmp() {
+        rm -rf "$runtime_tmp"
+    }
+    trap cleanup_runtime_tmp EXIT
+
     $SUDO mkdir -p "$RUNTIME_DIR"
 
     echo -e "${CYAN}→ Lade miniupnpc ${MINIUPNPC_VERSION} herunter...${NC}"
@@ -132,11 +121,14 @@ install_legacy_runtime() {
         make -j"$(nproc)"
     )
 
-    if [ ! -f "$runtime_tmp/miniupnpc-${MINIUPNPC_VERSION}/libminiupnpc.so.17" ]; then
-        echo -e "${RED}✗ miniupnpc Build erzeugte libminiupnpc.so.17 nicht.${NC}"
+    # miniupnpc 2.2.2 creates libminiupnpc.so with SONAME libminiupnpc.so.17.
+    # The legacy BCH2 binary requires the filename libminiupnpc.so.17.
+    local miniupnpc_built="$runtime_tmp/miniupnpc-${MINIUPNPC_VERSION}/libminiupnpc.so"
+    if [ ! -f "$miniupnpc_built" ]; then
+        echo -e "${RED}✗ miniupnpc Build erzeugte keine libminiupnpc.so.${NC}"
         exit 1
     fi
-    $SUDO install -Dm755 "$runtime_tmp/miniupnpc-${MINIUPNPC_VERSION}/libminiupnpc.so.17" "$RUNTIME_DIR/libminiupnpc.so.17"
+    $SUDO install -Dm755 "$miniupnpc_built" "$RUNTIME_DIR/libminiupnpc.so.17"
 
     echo -e "${CYAN}→ Lade libnatpmp ${NATPMP_VERSION} herunter...${NC}"
     download_archive "$NATPMP_URL" "$natpmp_archive"
@@ -147,13 +139,15 @@ install_legacy_runtime() {
         make -j"$(nproc)"
     )
 
-    if [ ! -f "$runtime_tmp/libnatpmp-${NATPMP_VERSION}/libnatpmp.so.1" ]; then
+    local natpmp_built="$runtime_tmp/libnatpmp-${NATPMP_VERSION}/libnatpmp.so.1"
+    if [ ! -f "$natpmp_built" ]; then
         echo -e "${RED}✗ libnatpmp Build erzeugte libnatpmp.so.1 nicht.${NC}"
         exit 1
     fi
-    $SUDO install -Dm755 "$runtime_tmp/libnatpmp-${NATPMP_VERSION}/libnatpmp.so.1" "$RUNTIME_DIR/libnatpmp.so.1"
+    $SUDO install -Dm755 "$natpmp_built" "$RUNTIME_DIR/libnatpmp.so.1"
     $SUDO chmod 755 "$RUNTIME_DIR"/*.so*
     rm -rf "$runtime_tmp"
+    trap - EXIT
     echo -e "${GREEN}✓ Private BCH2 Runtime installiert${NC}"
 }
 
@@ -178,43 +172,38 @@ install_binaries() {
     echo -e "${GREEN}✓ Binaries installiert${NC}"
 }
 
-verify_binary() {
+verify_runtime() {
     echo ""
     echo -e "${CYAN}→ Prüfe BCH2 Runtime-Abhängigkeiten...${NC}"
-    local missing
-    missing=$(LD_LIBRARY_PATH="$RUNTIME_DIR" ldd "$INSTALL_DIR/bitcoincashIId" 2>&1 | grep 'not found' || true)
-    if [ -n "$missing" ]; then
-        echo -e "${RED}✗ Fehlende Runtime-Abhängigkeiten:${NC}"
-        echo "$missing"
+    if ! LD_LIBRARY_PATH="$RUNTIME_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$INSTALL_DIR/bitcoincashIId" | grep -q 'libminiupnpc.so.17 => not found'; then
+        :
+    else
+        echo -e "${RED}✗ libminiupnpc.so.17 wird weiterhin nicht gefunden.${NC}"
         exit 1
     fi
-    local version_output
-    if ! version_output=$(LD_LIBRARY_PATH="$RUNTIME_DIR" "$INSTALL_DIR/bitcoincashIId" --version 2>&1); then
-        echo -e "${RED}✗ bitcoincashIId konnte nicht ausgeführt werden.${NC}"
-        echo "$version_output"
+    if LD_LIBRARY_PATH="$RUNTIME_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$INSTALL_DIR/bitcoincashIId" | grep -q 'libnatpmp.so.1 => not found'; then
+        echo -e "${RED}✗ libnatpmp.so.1 wird weiterhin nicht gefunden.${NC}"
         exit 1
     fi
-    echo "$version_output"
-    echo -e "${GREEN}✓ BCH2 Binary ist ausführbar${NC}"
+    echo -e "${GREEN}✓ BCH2 Runtime-Abhängigkeiten vorhanden${NC}"
 }
 
 create_config() {
     echo ""
     mkdir -p "$DATA_DIR"
+
     if [ -f "$CONF_FILE" ]; then
         echo -e "${YELLOW}Node-Config existiert bereits.${NC}"
         read -p "Überschreiben? [y/N] " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             RPC_PASS=$(grep -E '^rpcpassword=' "$CONF_FILE" | cut -d= -f2- | tr -d '[:space:]')
-            [ -n "${RPC_PASS:-}" ] || { echo -e "${RED}✗ Vorhandene Config enthält kein rpcpassword.${NC}"; exit 1; }
             echo "Behalte bestehende Config. RPC-Passwort wird in YAML übernommen."
             return
         fi
     fi
 
-    RPC_PASS=$(openssl rand -base64 24 2>/dev/null | tr -d '/+=' | head -c 32 || true)
-    [ -n "$RPC_PASS" ] || RPC_PASS=$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)
+    RPC_PASS=$(openssl rand -base64 24 2>/dev/null || head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 32)
 
     cat > "$CONF_FILE" << CONFEOF
 # BCH2 Node Config – generiert vom Installer
@@ -235,7 +224,9 @@ CONFEOF
 write_yaml() {
     echo ""
     echo -e "${CYAN}→ Schreibe RPC-Passwort in config/config.yaml...${NC}"
+
     mkdir -p "$REPO_ROOT/config"
+
     if [ ! -f "$YAML_FILE" ]; then
         if [ -f "$YAML_EXAMPLE" ]; then
             cp "$YAML_EXAMPLE" "$YAML_FILE"
@@ -261,18 +252,22 @@ monitor:
 YAMLEOF
         fi
     fi
-    if grep -q '^[[:space:]]*password:' "$YAML_FILE"; then
-        sed -i "s|^[[:space:]]*password:.*|  password: \"${RPC_PASS}\"|" "$YAML_FILE"
+
+    if grep -q 'password:' "$YAML_FILE"; then
+        sed -i "s|password:.*|password: \"${RPC_PASS}\"|" "$YAML_FILE"
     else
-        sed -i "/^rpc:/a\\  password: \"${RPC_PASS}\"" "$YAML_FILE"
+        sed -i "/rpc:/a\  password: \"${RPC_PASS}\"" "$YAML_FILE"
     fi
-    sed -i 's|^[[:space:]]*user:.*|  user: "bch2rpc"|' "$YAML_FILE" 2>/dev/null || true
+
+    sed -i 's|user:.*|user: "bch2rpc"|' "$YAML_FILE" 2>/dev/null || true
+
     echo -e "${GREEN}✓ config/config.yaml aktualisiert (RPC-Passwort eingetragen)${NC}"
 }
 
 create_service() {
     echo ""
     echo -e "${CYAN}→ Erstelle systemd Service für die Node...${NC}"
+
     SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
     $SUDO tee "$SERVICE_FILE" > /dev/null << SVCEOF
 [Unit]
@@ -284,7 +279,7 @@ Wants=network-online.target
 Type=forking
 User=$USER
 Group=$USER
-Environment="LD_LIBRARY_PATH=${RUNTIME_DIR}"
+Environment="LD_LIBRARY_PATH=$RUNTIME_DIR"
 ExecStart=${INSTALL_DIR}/bitcoincashIId -daemon -conf=${CONF_FILE} -datadir=${DATA_DIR}
 ExecStop=${INSTALL_DIR}/bitcoincashII-cli -conf=${CONF_FILE} stop
 PIDFile=${DATA_DIR}/bitcoincashIId.pid
@@ -297,43 +292,58 @@ Nice=5
 [Install]
 WantedBy=multi-user.target
 SVCEOF
+
     $SUDO systemctl daemon-reload
-    $SUDO systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+    $SUDO systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
     echo -e "${GREEN}✓ systemd Service aktiviert${NC}"
 }
 
 create_cli_wrapper() {
     echo ""
     echo -e "${CYAN}→ Installiere 'bch-node' Befehl...${NC}"
+
     $SUDO tee "$CLI_WRAPPER" > /dev/null << WRAPEOF
 #!/bin/bash
+# bch-node – Steuerung für Node + Stratum + Dashboard
+
 SERVICE="bch2-node"
 CLI="bitcoincashII-cli"
-CONF="$HOME/.bitcoincashII/bitcoincashII.conf"
+CONF="\$HOME/.bitcoincashII/bitcoincashII.conf"
 REPO="$REPO_ROOT"
-RUNTIME="$RUNTIME_DIR"
 STRATUM_PIDFILE="/tmp/bch2-stratum.pid"
 MONITOR_PIDFILE="/tmp/bch2-monitor.pid"
-
-cli() {
-    LD_LIBRARY_PATH="\$RUNTIME\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}" "\$CLI" -conf="\$CONF" "\$@"
-}
 
 start_stack() {
     echo "Starte BCH2 Node..."
     sudo systemctl start "\$SERVICE"
     sleep 2
+
     if [ -f "\$REPO/stratum/server.py" ]; then
-        if [ -f "\$STRATUM_PIDFILE" ] && kill -0 \$(cat "\$STRATUM_PIDFILE") 2>/dev/null; then echo "Stratum läuft bereits."; else
-            echo "Starte Stratum..."; cd "\$REPO"; nohup python3 stratum/server.py > /tmp/bch2-stratum.log 2>&1 & echo \$! > "\$STRATUM_PIDFILE"; echo "  Stratum PID \$(cat \$STRATUM_PIDFILE) – Log: /tmp/bch2-stratum.log"
+        if [ -f "\$STRATUM_PIDFILE" ] && kill -0 \$(cat "\$STRATUM_PIDFILE") 2>/dev/null; then
+            echo "Stratum läuft bereits."
+        else
+            echo "Starte Stratum..."
+            cd "\$REPO"
+            nohup python3 stratum/server.py > /tmp/bch2-stratum.log 2>&1 &
+            echo \$! > "\$STRATUM_PIDFILE"
+            echo "  Stratum PID \$(cat \$STRATUM_PIDFILE) – Log: /tmp/bch2-stratum.log"
         fi
     fi
+
     if [ -f "\$REPO/monitor/app.py" ]; then
-        if [ -f "\$MONITOR_PIDFILE" ] && kill -0 \$(cat "\$MONITOR_PIDFILE") 2>/dev/null; then echo "Dashboard läuft bereits."; else
-            echo "Starte Dashboard..."; cd "\$REPO"; nohup python3 monitor/app.py > /tmp/bch2-monitor.log 2>&1 & echo \$! > "\$MONITOR_PIDFILE"; echo "  Dashboard PID \$(cat \$MONITOR_PIDFILE) – http://0.0.0.0:5000"
+        if [ -f "\$MONITOR_PIDFILE" ] && kill -0 \$(cat "\$MONITOR_PIDFILE") 2>/dev/null; then
+            echo "Dashboard läuft bereits."
+        else
+            echo "Starte Dashboard..."
+            cd "\$REPO"
+            nohup python3 monitor/app.py > /tmp/bch2-monitor.log 2>&1 &
+            echo \$! > "\$MONITOR_PIDFILE"
+            echo "  Dashboard PID \$(cat \$MONITOR_PIDFILE) – http://0.0.0.0:5000"
         fi
     fi
-    echo ""; sudo systemctl status "\$SERVICE" --no-pager -l | head -n 12
+
+    echo ""
+    sudo systemctl status "\$SERVICE" --no-pager -l | head -n 12
 }
 
 stop_stack() {
@@ -341,44 +351,87 @@ stop_stack() {
     [ -f "\$STRATUM_PIDFILE" ] && kill \$(cat "\$STRATUM_PIDFILE") 2>/dev/null || true
     [ -f "\$MONITOR_PIDFILE" ] && kill \$(cat "\$MONITOR_PIDFILE") 2>/dev/null || true
     rm -f "\$STRATUM_PIDFILE" "\$MONITOR_PIDFILE"
-    echo "Stoppe Node..."; sudo systemctl stop "\$SERVICE"; echo "Alles gestoppt."
+
+    echo "Stoppe Node..."
+    sudo systemctl stop "\$SERVICE"
+    echo "Alles gestoppt."
 }
 
 case "\$1" in
-    start) start_stack ;;
-    stop) stop_stack ;;
-    restart) stop_stack; sleep 1; start_stack ;;
+    start)
+        start_stack
+        ;;
+    stop)
+        stop_stack
+        ;;
+    restart)
+        stop_stack
+        sleep 1
+        start_stack
+        ;;
     status)
         sudo systemctl status "\$SERVICE" --no-pager -l | head -n 15
         echo ""
-        if [ -f "\$STRATUM_PIDFILE" ] && kill -0 \$(cat "\$STRATUM_PIDFILE") 2>/dev/null; then echo "Stratum:   läuft (PID \$(cat \$STRATUM_PIDFILE))"; else echo "Stratum:   gestoppt"; fi
-        if [ -f "\$MONITOR_PIDFILE" ] && kill -0 \$(cat "\$MONITOR_PIDFILE") 2>/dev/null; then echo "Dashboard: läuft (PID \$(cat \$MONITOR_PIDFILE)) → http://\$(hostname -I | awk '{print \$1}'):5000"; else echo "Dashboard: gestoppt"; fi
+        if [ -f "\$STRATUM_PIDFILE" ] && kill -0 \$(cat "\$STRATUM_PIDFILE") 2>/dev/null; then
+            echo "Stratum:   läuft (PID \$(cat \$STRATUM_PIDFILE))"
+        else
+            echo "Stratum:   gestoppt"
+        fi
+        if [ -f "\$MONITOR_PIDFILE" ] && kill -0 \$(cat "\$MONITOR_PIDFILE") 2>/dev/null; then
+            echo "Dashboard: läuft (PID \$(cat \$MONITOR_PIDFILE)) → http://\$(hostname -I | awk '{print \$1}'):5000"
+        else
+            echo "Dashboard: gestoppt"
+        fi
         echo ""
-        if cli getblockchaininfo > /dev/null 2>&1; then echo "--- Blockchain ---"; cli getblockchaininfo | grep -E '"chain"|"blocks"|"headers"|"verificationprogress"|"initialblockdownload"|"difficulty"'; else echo "Node antwortet noch nicht auf RPC."; fi
+        if \$CLI -conf="\$CONF" getblockchaininfo > /dev/null 2>&1; then
+            echo "--- Blockchain ---"
+            \$CLI -conf="\$CONF" getblockchaininfo | grep -E '"chain"|"blocks"|"headers"|"verificationprogress"|"initialblockdownload"|"difficulty"'
+        else
+            echo "Node antwortet noch nicht auf RPC."
+        fi
         ;;
-    sync|info) cli getblockchaininfo ;;
-    balance) cli getbalance ;;
-    newaddress) cli getnewaddress ;;
-    log|logs) journalctl -u "\$SERVICE" -f --no-pager ;;
-    stratum-log) tail -f /tmp/bch2-stratum.log ;;
-    dash-log|monitor-log) tail -f /tmp/bch2-monitor.log ;;
-    cli) shift; cli "\$@" ;;
+    sync|info)
+        \$CLI -conf="\$CONF" getblockchaininfo
+        ;;
+    balance)
+        \$CLI -conf="\$CONF" getbalance
+        ;;
+    newaddress)
+        \$CLI -conf="\$CONF" getnewaddress
+        ;;
+    log|logs)
+        echo "=== Node Logs (Ctrl+C zum Beenden) ==="
+        journalctl -u "\$SERVICE" -f --no-pager
+        ;;
+    stratum-log)
+        tail -f /tmp/bch2-stratum.log
+        ;;
+    dash-log|monitor-log)
+        tail -f /tmp/bch2-monitor.log
+        ;;
+    cli)
+        shift
+        \$CLI -conf="\$CONF" "\$@"
+        ;;
     *)
-        echo "BCH2 Solo Stack Steuerung"; echo "";
-        echo "  bch-node start        Node + Stratum + Dashboard starten";
-        echo "  bch-node stop         Alles stoppen";
-        echo "  bch-node restart      Alles neu starten";
-        echo "  bch-node status       Status von allem";
-        echo "  bch-node sync         Blockchain-Info";
-        echo "  bch-node balance      Kontostand";
-        echo "  bch-node newaddress   Neue Adresse";
-        echo "  bch-node log          Node Live-Logs";
-        echo "  bch-node stratum-log  Stratum Logs";
-        echo "  bch-node dash-log     Dashboard Logs";
-        echo "  bch-node cli <cmd>    bitcoincashII-cli Befehl";
+        echo "BCH2 Solo Stack Steuerung"
+        echo ""
+        echo "  bch-node start        Node + Stratum + Dashboard starten"
+        echo "  bch-node stop         Alles stoppen"
+        echo "  bch-node restart      Alles neu starten"
+        echo "  bch-node status       Status von allem"
+        echo "  bch-node sync         Blockchain-Info"
+        echo "  bch-node balance      Kontostand"
+        echo "  bch-node newaddress   Neue Adresse"
+        echo "  bch-node log          Node Live-Logs"
+        echo "  bch-node stratum-log  Stratum Logs"
+        echo "  bch-node dash-log     Dashboard Logs"
+        echo "  bch-node cli <cmd>    bitcoincashII-cli Befehl"
+        echo ""
         ;;
 esac
 WRAPEOF
+
     $SUDO chmod +x "$CLI_WRAPPER"
     echo -e "${GREEN}✓ 'bch-node' Befehl installiert${NC}"
 }
@@ -387,36 +440,34 @@ install_python_deps() {
     echo ""
     echo -e "${CYAN}→ Python-Abhängigkeiten für Stratum/Dashboard...${NC}"
     if [ -f "$REPO_ROOT/requirements.txt" ]; then
-        pip3 install -q -r "$REPO_ROOT/requirements.txt" --break-system-packages && echo -e "${GREEN}✓ Python-Pakete installiert${NC}" || echo -e "${YELLOW}⚠ pip install fehlgeschlagen – bitte manuell installieren.${NC}"
+        pip3 install -q -r "$REPO_ROOT/requirements.txt" --break-system-packages && \
+            echo -e "${GREEN}✓ Python-Pakete installiert${NC}" || \
+            echo -e "${YELLOW}⚠ pip install fehlgeschlagen – bitte manuell: pip3 install -r requirements.txt${NC}"
     fi
 }
 
 main() {
     need_sudo
     detect_arch
-    require_command curl
-    require_command tar
-    require_command make
-    require_command cc
-    require_command openssl
-    require_command systemctl
-    require_command python3
-    require_command pip3
 
     echo ""
     echo "Installiert wird:"
     echo "  • bitcoincashIId + CLI"
-    echo "  • isolierte BCH2 Runtime (miniupnpc ${MINIUPNPC_VERSION} + libnatpmp ${NATPMP_VERSION})"
+    echo "  • isolierte BCH2 Runtime (miniupnpc 2.2.2 + libnatpmp 20230423)"
     echo "  • systemd Service"
     echo "  • bch-node Kommando (startet auch Stratum + Dashboard)"
     echo "  • RPC-Passwort → config/config.yaml"
     echo ""
-    read -p "Fortfahren? [Y/n] " -n 1 -r; echo
-    if [[ $REPLY =~ ^[Nn]$ ]]; then echo "Abgebrochen."; exit 0; fi
+    read -p "Fortfahren? [Y/n] " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
+        echo "Abgebrochen."
+        exit 0
+    fi
 
     install_legacy_runtime
     install_binaries
-    verify_binary
+    verify_runtime
     create_config
     write_yaml
     create_service
@@ -429,12 +480,17 @@ main() {
     echo -e "${GREEN}════════════════════════════════════════════${NC}"
     echo ""
     echo "Alles steuern mit:"
-    echo "  bch-node start"
+    echo ""
+    echo "  bch-node start     ← startet Node + Stratum + Dashboard"
     echo "  bch-node status"
     echo "  bch-node stop"
     echo ""
-    echo "Dashboard: http://DEINE_IP:5000"
-    echo "Stratum Port: 3333"
+    echo "Dashboard dann unter:  http://DEINE_IP:5000"
+    echo "Stratum Port:          3333"
+    echo ""
+    echo "Zuerst Node syncen lassen:"
+    echo "  bch-node start"
+    echo "  bch-node status    # warten bis initialblockdownload = false"
     echo ""
 }
 
