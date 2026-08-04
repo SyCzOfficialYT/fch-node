@@ -15,11 +15,11 @@ pool:
   stratum_port: 3333
   stratum_host: "0.0.0.0"
   
-  # Start-Difficulty für den Miner (gut für NerdQaxe++)
-  start_difficulty: 1000
+  # Start-Difficulty – 256 ist gut für NerdQaxe++
+  start_difficulty: 256
   
   # Job-Update Intervall in Sekunden
-  job_interval: 30
+  job_interval: 25
 
 monitor:
   host: "0.0.0.0"
