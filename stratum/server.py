@@ -2,6 +2,7 @@
 """
 BCH2 Production Solo Stratum – AxeOS / NerdQaxe++ kompatibel
 
+WORKING VERSION (commit 88b5e26) – ACCEPT shares confirmed 2026-08-04
 - coinbase = coinb1 + en1 + en2 + coinb2
 - Version-Rolling: (job & ~mask) | (submitted & mask)
 - prevhash notify = reverse WORD ORDER of BE (NerdQaxe does swap_endian_words)
@@ -19,7 +20,6 @@ import binascii
 import os
 import yaml
 from pathlib import Path
-from typing import List, Tuple
 import requests
 from requests.auth import HTTPBasicAuth
 
@@ -42,52 +42,6 @@ JOB_INTERVAL = int(cfg["pool"].get("job_interval", 25))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("bch2-stratum")
-
-STATS_PATH = Path(__file__).parent.parent / "data" / "stats.json"
-STATS_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-_stats_lock = threading.Lock()
-_stats = {
-    "shares_ok": 0,
-    "shares_bad": 0,
-    "blocks_found": 0,
-    "last_share_time": None,
-    "last_share_diff": None,
-    "last_share_hash": None,
-    "best_share_diff": 0,
-    "workers": {},
-    "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-    "block_rewards_total": 0.0,
-}
-
-
-def _save_stats():
-    try:
-        with _stats_lock:
-            STATS_PATH.write_text(json.dumps(_stats, indent=2))
-    except Exception as e:
-        log.debug("stats save: %s", e)
-
-
-def _record_share(ok: bool, worker: str, diff: float, hhex: str = "", block: bool = False, reward: float = 0.0):
-    with _stats_lock:
-        if ok:
-            _stats["shares_ok"] += 1
-            _stats["last_share_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            _stats["last_share_diff"] = diff
-            _stats["last_share_hash"] = hhex
-            if diff and diff > (_stats.get("best_share_diff") or 0):
-                _stats["best_share_diff"] = diff
-            w = _stats["workers"].setdefault(worker, {"ok": 0, "bad": 0})
-            w["ok"] += 1
-        else:
-            _stats["shares_bad"] += 1
-            w = _stats["workers"].setdefault(worker, {"ok": 0, "bad": 0})
-            w["bad"] += 1
-        if block:
-            _stats["blocks_found"] += 1
-            _stats["block_rewards_total"] = _stats.get("block_rewards_total", 0) + reward
-    _save_stats()
 
 
 def rpc(method: str, params=None):
@@ -423,12 +377,10 @@ class Client(threading.Thread):
             self.send({"id": mid, "result": False, "error": [23, "low difficulty", None]})
             self.shares_bad += 1
             log.info("REJECT lowdiff worker=%s hash=%s diff=%s ver=%08x", self.worker, h[::-1].hex()[:16], self.diff, version)
-            _record_share(False, self.worker, float(self.diff), h[::-1].hex()[:16])
             return
         self.send({"id": mid, "result": True, "error": None})
         self.shares_ok += 1
         log.info("ACCEPT share #%d worker=%s hash=%s diff=%s ver=%08x", self.shares_ok, self.worker, h[::-1].hex()[:16], self.diff, version)
-        _record_share(True, self.worker, float(self.diff), h[::-1].hex()[:16])
         if h_int <= job["target"]:
             log.warning("*** BLOCK CANDIDATE *** height=%s hash=%s", job["height"], h[::-1].hex())
             tx_count = 1 + len(job["template"].get("transactions", []))
@@ -438,7 +390,6 @@ class Client(threading.Thread):
             res = rpc("submitblock", [binascii.hexlify(block).decode()])
             if res in (None, ""):
                 log.warning("*** BLOCK ACCEPTED BY NETWORK ***")
-                _record_share(True, self.worker, float(self.diff), h[::-1].hex()[:16], block=True, reward=job["value"] / 1e8)
             else:
                 log.error("submitblock rejected: %s", res)
 
@@ -503,7 +454,6 @@ def main():
     log.info("=" * 50)
     store.ensure_spk()
     store.refresh()
-    _save_stats()
     threading.Thread(target=job_loop, daemon=True).start()
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
