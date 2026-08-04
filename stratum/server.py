@@ -3,8 +3,9 @@
 BCH2 Production Solo Stratum – AxeOS / NerdQaxe++ kompatibel
 
 - coinbase = coinb1 + en1 + en2 + coinb2
-- Version-Rolling: volle Version = (job & ~mask) | (submitted & mask)
-- prevhash byte-reverse, Header LE
+- Version-Rolling: (job & ~mask) | (submitted & mask)
+- prevhash notify = reverse WORD ORDER of BE (NerdQaxe does swap_endian_words)
+- header validation uses LE prevhash = full byte-reverse of BE
 """
 
 import socket
@@ -92,7 +93,14 @@ def difficulty_to_target(diff: float) -> int:
 
 
 def stratum_prevhash(rpc_be_hex: str) -> str:
-    return binascii.hexlify(binascii.unhexlify(rpc_be_hex)[::-1]).decode()
+    """Stratum prevhash for NerdQaxe/ckpool/mkpool:
+    Reverse ORDER of 8x4-byte words of BE hash (not full byte-reverse).
+    Firmware applies swap_endian_words → correct LE header prevhash.
+    """
+    h = rpc_be_hex.lower()
+    if len(h) != 64:
+        return binascii.hexlify(binascii.unhexlify(h)[::-1]).decode()
+    return "".join(h[i : i + 8] for i in range(56, -1, -8))
 
 
 CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
