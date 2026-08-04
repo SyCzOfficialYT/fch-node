@@ -2,10 +2,9 @@
 """
 BCH2 Production Solo Stratum – AxeOS / NerdQaxe++ kompatibel
 
-Fixes:
-- Korrekte coinb1/coinb2
-- Korrekte Merkle-Branches im mining.notify
-- Share-Validierung matched dem was der Miner hasht
+- Korrekte coinb1/coinb2 + Merkle-Branches
+- Password d=XXXX setzt Share-Difficulty (z.B. d=12868.4)
+- Block-Difficulty kommt von der Node (getblocktemplate)
 """
 
 import socket
@@ -295,8 +294,18 @@ class Client(threading.Thread):
 
     def handle_authorize(self, mid, params):
         self.worker = params[0] if params else "?"
+        # Password kann d=XXXX enthalten (NerdQaxe / AxeOS Style)
+        password = params[1] if len(params) > 1 else ""
+        if isinstance(password, str) and password.lower().startswith("d="):
+            try:
+                d = float(password[2:].strip())
+                if 16 <= d <= 10_000_000:
+                    self.diff = max(16, int(round(d)))
+                    log.info("password d= → difficulty %s", self.diff)
+            except Exception:
+                pass
         self.send({"id": mid, "result": True, "error": None})
-        log.info("authorize %s", self.worker)
+        log.info("authorize %s  share_diff=%s", self.worker, self.diff)
         self.send({"id": None, "method": "mining.set_difficulty", "params": [self.diff]})
         self.push_job(clean=True)
 
@@ -304,8 +313,8 @@ class Client(threading.Thread):
         if params:
             try:
                 d = float(params[0])
-                if 16 <= d <= 1_000_000:
-                    self.diff = int(d)
+                if 16 <= d <= 10_000_000:
+                    self.diff = max(16, int(round(d)))
                     log.info("suggest_difficulty → %s", self.diff)
                     self.send({"id": None, "method": "mining.set_difficulty", "params": [self.diff]})
             except Exception:
