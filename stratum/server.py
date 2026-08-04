@@ -248,7 +248,7 @@ def serialize_coinbase_tx(
     script_sig = height_script + extranonce1 + extranonce2 + b"/BCH2-Solo/"
     if not 2 <= len(script_sig) <= 100:
         raise ValueError(f"Coinbase scriptSig length {len(script_sig)} outside 2..100")
-    tx = struct.pack("<I", 2)
+    tx = struct.pack("<I", 1)
     tx += b"\x01" + b"\x00" * 32 + struct.pack("<I", 0xFFFFFFFF)
     tx += encode_varint(len(script_sig)) + script_sig + struct.pack("<I", 0xFFFFFFFF)
     tx += b"\x01" + struct.pack("<Q", value_sats)
@@ -295,13 +295,9 @@ class Job:
         self.tx_hashes = [binascii.unhexlify(tx["txid"])[::-1] for tx in template.get("transactions", [])]
 
     def build_coinbase(self, extranonce1: bytes, extranonce2: bytes) -> bytes:
-        return serialize_coinbase_tx(
-            self.height,
-            self.coinbase_value,
-            self.script_pubkey,
-            extranonce1,
-            extranonce2,
-        )
+        # Use coinbase_parts so that validation and mining.notify are identical.
+        prefix, suffix = self.coinbase_parts(extranonce1)
+        return prefix + extranonce2 + suffix
 
     def coinbase_parts(self, extranonce1: bytes) -> Tuple[bytes, bytes]:
         h = self.height
@@ -310,13 +306,18 @@ class Job:
             h_bytes += bytes([h & 0xFF])
             h >>= 8
         height_script = bytes([len(h_bytes)]) + h_bytes
-        script_sig = height_script + extranonce1 + (b"\x00" * 4) + b"/BCH2-Solo/"
-        if not 2 <= len(script_sig) <= 100:
-            raise ValueError(f"Coinbase scriptSig length {len(script_sig)} outside 2..100")
-        prefix = struct.pack("<I", 2)
+        # coinbase_1 = prefix (ends with extranonce1)
+        # miner inserts: extranonce1 + extranonce2
+        # coinbase_2 = suffix (starts after extranonce2)
+        script_sig_prefix = height_script + extranonce1
+        script_sig_suffix = b"/BCH2-Solo/"
+        script_sig_len = len(script_sig_prefix) + 4 + len(script_sig_suffix)
+        if not 2 <= script_sig_len <= 100:
+            raise ValueError(f"Coinbase scriptSig length {script_sig_len} outside 2..100")
+        prefix = struct.pack("<I", 1)
         prefix += b"\x01" + b"\x00" * 32 + struct.pack("<I", 0xFFFFFFFF)
-        prefix += encode_varint(len(script_sig)) + height_script + extranonce1
-        suffix = b"\x00" * 4 + b"/BCH2-Solo/" + struct.pack("<I", 0xFFFFFFFF)
+        prefix += encode_varint(script_sig_len) + script_sig_prefix
+        suffix = script_sig_suffix + struct.pack("<I", 0xFFFFFFFF)
         suffix += b"\x01" + struct.pack("<Q", self.coinbase_value)
         suffix += encode_varint(len(self.script_pubkey)) + self.script_pubkey + struct.pack("<I", 0)
         return prefix, suffix
@@ -332,9 +333,14 @@ class Job:
         version: Optional[int] = None,
     ) -> bytes:
         header_version = self.version if version is None else version
+        prevhash_bytes = binascii.unhexlify(self.prevhash)
+        # ESP-Miner expects the prevhash with 32-bit words reversed (same as
+        # reverse_hex() sends in mining.notify).  Each word stays in original
+        # byte order; only the word order is reversed.
+        prevhash_le = b"".join(prevhash_bytes[i : i + 4] for i in range(28, -1, -4))
         return (
             struct.pack("<I", header_version & 0xFFFFFFFF)
-            + binascii.unhexlify(self.prevhash)[::-1]
+            + prevhash_le
             + merkle_root
             + struct.pack("<I", ntime & 0xFFFFFFFF)
             + struct.pack("<I", int(self.nbits, 16) & 0xFFFFFFFF)
