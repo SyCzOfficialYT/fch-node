@@ -3,7 +3,7 @@
 BCH2 Production Solo Stratum – AxeOS / NerdQaxe++ kompatibel
 
 - coinbase = coinb1 + en1 + en2 + coinb2
-- Version-Rolling (6. mining.submit Parameter)
+- Version-Rolling: volle Version = (job & ~mask) | (submitted & mask)
 - prevhash byte-reverse, Header LE
 """
 
@@ -338,7 +338,15 @@ class Client(threading.Thread):
                 en2 = (en2 + b"\x00" * self.en2_size)[: self.en2_size]
             ntime = int(ntime_hex, 16)
             nonce = int(nonce_hex, 16)
-            version = int(version_hex, 16) if version_hex else job["version"]
+            VERSION_MASK = 0x1FFFE000
+            if version_hex:
+                submitted_ver = int(version_hex, 16)
+                if submitted_ver >= 0x20000000:
+                    version = submitted_ver
+                else:
+                    version = (int(job["version"]) & ~VERSION_MASK) | (submitted_ver & VERSION_MASK)
+            else:
+                version = int(job["version"])
         except Exception:
             self.send({"id": mid, "result": False, "error": [20, "bad hex", None]})
             self.shares_bad += 1
