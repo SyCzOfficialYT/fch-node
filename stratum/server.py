@@ -2,10 +2,10 @@
 """
 BCH2 Production Solo Stratum – AxeOS / NerdQaxe++ kompatibel
 
-- Korrekte coinb1/coinb2 + Merkle-Branches
-- Password d=XXXX setzt Share-Difficulty (z.B. d=12868.4)
-- Block-Difficulty kommt von der Node (getblocktemplate)
-- prevhash im Stratum-Wortformat (4-byte words reversed)
+Korrekt nach Stratum-V1 / ckpool / mining-dutch Konvention:
+  coinbase = coinb1 + extranonce1 + extranonce2 + coinb2
+  prevhash in notify = full byte-reverse of RPC BE hash
+  header: version|prevhash_LE|merkle_LE|ntime_LE|nbits_LE|nonce_LE
 """
 
 import socket
@@ -19,7 +19,7 @@ import binascii
 import os
 import yaml
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import List, Tuple, Optional
 import requests
 from requests.auth import HTTPBasicAuth
 
@@ -80,10 +80,7 @@ def encode_varint(n: int) -> bytes:
 
 
 def bits_to_target(nbits) -> int:
-    if isinstance(nbits, str):
-        bits = int(nbits, 16)
-    else:
-        bits = int(nbits)
+    bits = int(nbits, 16) if isinstance(nbits, str) else int(nbits)
     exp = bits >> 24
     mant = bits & 0xFFFFFF
     if exp <= 3:
@@ -95,20 +92,16 @@ def difficulty_to_target(diff: float) -> int:
     return int(0x00000000FFFF0000000000000000000000000000000000000000000000000000 / max(diff, 0.0001))
 
 
-def uint256_swab_hex(h: str) -> str:
-    """Stratum prevhash: reverse order of 4-byte words (not full byte-reverse)."""
-    h = h.lower()
-    if len(h) != 64:
-        return binascii.hexlify(binascii.unhexlify(h)[::-1]).decode()
-    return "".join(h[i : i + 8] for i in range(56, -1, -8))
+def stratum_prevhash(rpc_be_hex: str) -> str:
+    """RPC previousblockhash is BE display; stratum wants full byte-reverse."""
+    return binascii.hexlify(binascii.unhexlify(rpc_be_hex)[::-1]).decode()
 
 
 CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 
 
 def _convertbits(data, frombits, tobits, pad=True):
-    acc = 0
-    bits = 0
+    acc = bits = 0
     ret = []
     maxv = (1 << tobits) - 1
     for v in data:
@@ -129,26 +122,20 @@ def address_to_scriptpubkey(addr: str) -> bytes:
     info2 = rpc("getaddressinfo", [addr])
     if info2 and info2.get("scriptPubKey"):
         return binascii.unhexlify(info2["scriptPubKey"])
-
     a = addr.lower()
-    if ":" in a:
-        _, payload = a.split(":", 1)
-    else:
-        payload = a
-    data5 = [CHARSET.index(c) for c in payload if c in CHARSET]
-    data5 = data5[:-8]
+    payload = a.split(":")[-1]
+    data5 = [CHARSET.index(c) for c in payload if c in CHARSET][:-8]
     decoded = bytes(_convertbits(data5, 5, 8, pad=False))
     h160 = decoded[1:21]
     if len(h160) != 20:
-        raise ValueError("bad hash160 from cashaddr")
+        raise ValueError("bad hash160")
     return b"\x76\xa9\x14" + h160 + b"\x88\xac"
 
 
 def bip34_height(height: int) -> bytes:
     if height == 0:
         return b"\x00"
-    h = height
-    b = b""
+    h, b = height, b""
     while h > 0:
         b += bytes([h & 0xFF])
         h >>= 8
@@ -159,14 +146,17 @@ def build_coinbase_parts(
     height: int,
     value_sats: int,
     script_pubkey: bytes,
-    extranonce1: bytes,
-    extranonce2_size: int = 4,
+    en1_size: int = 4,
+    en2_size: int = 4,
 ) -> Tuple[str, str]:
+    """
+    Pool-Standard:
+      coinbase = coinb1 + extranonce1 + extranonce2 + coinb2
+    extranonces are NOT embedded in coinb1/coinb2.
+    """
     tag = b"/BCH2-Solo/"
     height_script = bip34_height(height)
-    script_prefix = height_script + extranonce1
-    script_suffix = tag
-    scriptsig_len = len(script_prefix) + extranonce2_size + len(script_suffix)
+    scriptsig_len = len(height_script) + en1_size + en2_size + len(tag)
 
     part1 = b""
     part1 += struct.pack("<I", 2)
@@ -174,10 +164,10 @@ def build_coinbase_parts(
     part1 += b"\x00" * 32
     part1 += struct.pack("<I", 0xFFFFFFFF)
     part1 += encode_varint(scriptsig_len)
-    part1 += script_prefix
+    part1 += height_script  # stop BEFORE extranonces
 
     part2 = b""
-    part2 += script_suffix
+    part2 += tag
     part2 += struct.pack("<I", 0xFFFFFFFF)
     part2 += b"\x01"
     part2 += struct.pack("<Q", value_sats)
@@ -187,14 +177,14 @@ def build_coinbase_parts(
     return binascii.hexlify(part1).decode(), binascii.hexlify(part2).decode()
 
 
-def assemble_coinbase(coinb1_hex: str, extranonce2: bytes, coinb2_hex: str) -> bytes:
-    return binascii.unhexlify(coinb1_hex) + extranonce2 + binascii.unhexlify(coinb2_hex)
+def assemble_coinbase(coinb1: str, en1: bytes, en2: bytes, coinb2: str) -> bytes:
+    return binascii.unhexlify(coinb1) + en1 + en2 + binascii.unhexlify(coinb2)
 
 
 def full_merkle_root(coinbase_hash_le: bytes, other_tx_le: List[bytes]) -> bytes:
     layer = [coinbase_hash_le] + other_tx_le
     while len(layer) > 1:
-        if len(layer) % 2 == 1:
+        if len(layer) % 2:
             layer.append(layer[-1])
         layer = [sha256d(layer[i] + layer[i + 1]) for i in range(0, len(layer), 2)]
     return layer[0]
@@ -221,28 +211,18 @@ class JobStore:
             log.warning("getblocktemplate failed")
             return None
 
-        height = tmpl["height"]
-        value = tmpl["coinbasevalue"]
-        prevhash = tmpl["previousblockhash"]
-        version = tmpl["version"]
+        other_tx = [binascii.unhexlify(tx["txid"])[::-1] for tx in tmpl.get("transactions", [])]
         nbits = tmpl["bits"]
-        ntime = tmpl["curtime"]
-        target = bits_to_target(nbits)
-
-        other_tx = []
-        for tx in tmpl.get("transactions", []):
-            other_tx.append(binascii.unhexlify(tx["txid"])[::-1])
-
-        job_id = f"{height:x}-{int(time.time()) & 0xFFFFFF:x}"
+        job_id = f"{tmpl['height']:x}-{int(time.time()) & 0xFFFFFF:x}"
         job = {
             "id": job_id,
-            "height": height,
-            "value": value,
-            "prevhash": prevhash,
-            "version": version,
+            "height": tmpl["height"],
+            "value": tmpl["coinbasevalue"],
+            "prevhash": tmpl["previousblockhash"],
+            "version": tmpl["version"],
             "nbits": nbits if isinstance(nbits, str) else f"{nbits:08x}",
-            "ntime": ntime,
-            "target": target,
+            "ntime": tmpl["curtime"],
+            "target": bits_to_target(nbits),
             "template": tmpl,
             "spk": self.script_pubkey,
             "other_tx": other_tx,
@@ -253,10 +233,7 @@ class JobStore:
                 for k in sorted(self.jobs.keys())[:-6]:
                     self.jobs.pop(k, None)
             self.current_id = job_id
-        log.info(
-            "Job %s height=%s value=%.8f txs=%d",
-            job_id, height, value / 1e8, len(other_tx),
-        )
+        log.info("Job %s height=%s value=%.8f txs=%d", job_id, job["height"], job["value"] / 1e8, len(other_tx))
         return job
 
     def get(self, job_id):
@@ -341,38 +318,29 @@ class Client(threading.Thread):
             return
 
         coinb1, coinb2 = build_coinbase_parts(
-            job["height"], job["value"], job["spk"], self.en1, self.en2_size
+            job["height"], job["value"], job["spk"], len(self.en1), self.en2_size
         )
 
         branches = []
-        if job["other_tx"]:
-            hashes = job["other_tx"][:]
-            while hashes:
-                branches.append(binascii.hexlify(hashes[0][::-1]).decode())
-                rest = hashes[1:]
-                if not rest:
-                    break
-                if len(rest) % 2 == 1:
-                    rest = rest + [rest[-1]]
-                nxt = []
-                for i in range(0, len(rest), 2):
-                    nxt.append(sha256d(rest[i] + rest[i + 1]))
-                hashes = nxt
-
-        prev_swab = uint256_swab_hex(job["prevhash"])
-        ver = f"{job['version']:08x}"
-        bits = job["nbits"] if len(job["nbits"]) == 8 else f"{int(job['nbits'], 16):08x}"
-        ntime = f"{job['ntime']:08x}"
+        hashes = job["other_tx"][:]
+        while hashes:
+            branches.append(binascii.hexlify(hashes[0][::-1]).decode())
+            rest = hashes[1:]
+            if not rest:
+                break
+            if len(rest) % 2:
+                rest = rest + [rest[-1]]
+            hashes = [sha256d(rest[i] + rest[i + 1]) for i in range(0, len(rest), 2)]
 
         params = [
             job["id"],
-            prev_swab,
+            stratum_prevhash(job["prevhash"]),
             coinb1,
             coinb2,
             branches,
-            ver,
-            bits,
-            ntime,
+            f"{job['version']:08x}",
+            job["nbits"] if len(job["nbits"]) == 8 else f"{int(job['nbits'], 16):08x}",
+            f"{job['ntime']:08x}",
             clean,
         ]
         self.send({"id": None, "method": "mining.notify", "params": params})
@@ -388,7 +356,7 @@ class Client(threading.Thread):
         if not job:
             self.send({"id": mid, "result": False, "error": [21, "stale job", None]})
             self.shares_bad += 1
-            log.info("REJECT stale job=%s worker=%s", job_id, self.worker)
+            log.info("REJECT stale job=%s", job_id)
             return
 
         try:
@@ -403,9 +371,9 @@ class Client(threading.Thread):
             return
 
         coinb1, coinb2 = build_coinbase_parts(
-            job["height"], job["value"], job["spk"], self.en1, self.en2_size
+            job["height"], job["value"], job["spk"], len(self.en1), self.en2_size
         )
-        coinbase_tx = assemble_coinbase(coinb1, en2, coinb2)
+        coinbase_tx = assemble_coinbase(coinb1, self.en1, en2, coinb2)
         coinbase_hash = sha256d(coinbase_tx)
         merkle = full_merkle_root(coinbase_hash, job["other_tx"])
 
@@ -420,25 +388,18 @@ class Client(threading.Thread):
         h = sha256d(header)
         h_int = int.from_bytes(h[::-1], "big")
         share_target = difficulty_to_target(self.diff)
-        net_target = job["target"]
 
         if h_int > share_target:
             self.send({"id": mid, "result": False, "error": [23, "low difficulty", None]})
             self.shares_bad += 1
-            log.info(
-                "REJECT lowdiff worker=%s hash=%s diff=%s",
-                self.worker, h[::-1].hex()[:16], self.diff,
-            )
+            log.info("REJECT lowdiff worker=%s hash=%s diff=%s", self.worker, h[::-1].hex()[:16], self.diff)
             return
 
         self.send({"id": mid, "result": True, "error": None})
         self.shares_ok += 1
-        log.info(
-            "ACCEPT share #%d worker=%s hash=%s diff=%s",
-            self.shares_ok, self.worker, h[::-1].hex()[:16], self.diff,
-        )
+        log.info("ACCEPT share #%d worker=%s hash=%s diff=%s", self.shares_ok, self.worker, h[::-1].hex()[:16], self.diff)
 
-        if h_int <= net_target:
+        if h_int <= job["target"]:
             log.warning("*** BLOCK CANDIDATE *** height=%s hash=%s", job["height"], h[::-1].hex())
             tx_count = 1 + len(job["template"].get("transactions", []))
             block = header + encode_varint(tx_count) + coinbase_tx
@@ -470,7 +431,6 @@ class Client(threading.Thread):
                     mid = msg.get("id")
                     method = msg.get("method")
                     params = msg.get("params") or []
-
                     if method == "mining.subscribe":
                         self.handle_subscribe(mid, params)
                     elif method == "mining.authorize":
@@ -483,11 +443,8 @@ class Client(threading.Thread):
                         self.handle_suggest_difficulty(mid, params)
                     elif method == "mining.configure":
                         self.send({"id": mid, "result": {}, "error": None})
-                    else:
-                        if method:
-                            log.debug("unknown method %s", method)
-                        if mid is not None:
-                            self.send({"id": mid, "result": None, "error": [20, "unknown", None]})
+                    elif mid is not None:
+                        self.send({"id": mid, "result": None, "error": [20, "unknown", None]})
         except Exception as e:
             log.error("client %s: %s", self.addr, e)
         finally:
@@ -513,19 +470,14 @@ def main():
     log.info("Payout : %s", PAYOUT_ADDRESS)
     log.info("Listen : %s:%s  start_diff=%s", STRATUM_HOST, STRATUM_PORT, START_DIFF)
     log.info("=" * 50)
-
     store.ensure_spk()
     store.refresh()
-
-    t = threading.Thread(target=job_loop, daemon=True)
-    t.start()
-
+    threading.Thread(target=job_loop, daemon=True).start()
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((STRATUM_HOST, STRATUM_PORT))
     sock.listen(16)
     log.info("waiting for miners...")
-
     while True:
         conn, addr = sock.accept()
         log.info("connect %s", addr)
